@@ -16,7 +16,7 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 	// Determine the number of goroutines to use based on available CPU cores
 	numCPU := runtime.NumCPU()
 	numWorkers := numCPU * 1 // Use 2x the number of CPUs for best performance
-	fmt.Printf("Starting key search with %d workers...\n", numWorkers)
+	fmt.Printf("%sStarting key search with %d workers...%s\n", ColorBlue, numWorkers, ColorReset)
 	
 	// Determine the limit for iterations to prevent infinite loops
 	diff := new(big.Int).Sub(maxKey, minKey)
@@ -25,7 +25,7 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 	maxIterations := big.NewInt(1000000) // Limit to 1 million iterations
 	if diff.Cmp(maxIterations) > 0 {
 		limit = maxIterations
-		fmt.Printf("Range is very large, limiting to %s iterations\n", maxIterations.String())
+		fmt.Printf("%sRange is very large, limiting to %s iterations%s\n", ColorYellow, maxIterations.String(), ColorReset)
 	}
 
 	// Variables for synchronization and tracking
@@ -66,7 +66,7 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 			elapsedSeconds := currentTime.Sub(startTime).Seconds()
 			itCount := atomic.LoadInt64(&totalIterations)
 			keysPerSecond := float64(itCount) / elapsedSeconds
-			fmt.Printf("Checked %d keys (%.2f keys/sec)\n", itCount, keysPerSecond)
+			fmt.Printf("%sChecked %d keys (%.2f keys/sec)%s\n", ColorCyan, itCount, keysPerSecond, ColorReset)
 		}
 	}()
 	
@@ -110,7 +110,7 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 				// Generate address from private key
 				address, err := privateKeyToAddress(privateKeyBytes)
 				if err != nil {
-					fmt.Printf("Worker %d: Error generating address: %v\n", workerID, err)
+					fmt.Printf("%sWorker %d: Error generating address: %v%s\n", ColorRed, workerID, err, ColorReset)
 					return
 				}
 				
@@ -164,11 +164,11 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 	matchMutex.Lock()
 	if foundMatch {
 		privateKeyHex := hex.EncodeToString(foundKey)
-		fmt.Printf("\nMATCH FOUND!\n")
-		fmt.Printf("Private Key: %s\n", privateKeyHex)
-		fmt.Printf("Address: %s\n", foundAddress)
+		fmt.Printf("\n%sMATCH FOUND!%s\n", ColorBoldGreen, ColorReset)
+		fmt.Printf("%sPrivate Key: %s%s%s\n", ColorGreen, ColorBoldGreen, privateKeyHex, ColorReset)
+		fmt.Printf("%sAddress: %s%s%s\n", ColorGreen, ColorBoldGreen, foundAddress, ColorReset)
 	} else {
-		fmt.Printf("\nNo match found after checking approximately %d keys.\n", atomic.LoadInt64(&totalIterations))
+		fmt.Printf("\n%sNo match found after checking approximately %d keys.%s\n", ColorYellow, atomic.LoadInt64(&totalIterations), ColorReset)
 	}
 	matchMutex.Unlock()
 }
