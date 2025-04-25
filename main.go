@@ -9,11 +9,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
-)
+)	
 
 // WalletData represents the structure of the wallets.json file
 type WalletData struct {
@@ -100,6 +101,8 @@ func main() {
 	}
 
 	iterations := big.NewInt(0)
+	startTime := time.Now()
+	lastReportTime := startTime
 	
 	// Main loop
 	for currentKey.Cmp(maxKey) <= 0 && iterations.Cmp(limit) < 0 {
@@ -124,8 +127,15 @@ func main() {
 		
 		// Progress reporting
 		iterations.Add(iterations, oneBI)
-		if iterations.Mod(iterations, big.NewInt(1000)).Cmp(big.NewInt(0)) == 0 {
-			fmt.Printf("Checked %s keys...\n", iterations.String())
+		
+		// Report speed every 10 seconds
+		currentTime := time.Now()
+		if currentTime.Sub(lastReportTime).Seconds() >= 10 {
+			elapsedSeconds := currentTime.Sub(startTime).Seconds()
+			iterationsFloat, _ := new(big.Float).SetInt(iterations).Float64()
+			keysPerSecond := iterationsFloat / elapsedSeconds
+			fmt.Printf("Checked %s keys (%.2f keys/sec)\n", iterations.String(), keysPerSecond)
+			lastReportTime = currentTime
 		}
 		
 		// Increment key
