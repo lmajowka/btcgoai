@@ -29,6 +29,8 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 	var foundKey []byte
 	var foundAddress string
 	var totalIterations int64 = 0
+	var lastKeyMutex sync.Mutex
+	lastKeyChecked := new(big.Int)
 	
 	// Divide the keyspace into chunks for each worker
 	chunkSize := new(big.Int).Div(limit, big.NewInt(int64(numWorkers)))
@@ -60,7 +62,13 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 			elapsedSeconds := currentTime.Sub(startTime).Seconds()
 			itCount := atomic.LoadInt64(&totalIterations)
 			keysPerSecond := float64(itCount) / elapsedSeconds
-			fmt.Printf("%sChecked %d keys (%.2f keys/sec)%s\n", ColorCyan, itCount, keysPerSecond, ColorReset)
+			
+			// Get the last key checked
+			lastKeyMutex.Lock()
+			lastKeyHex := hex.EncodeToString(lastKeyChecked.Bytes())
+			lastKeyMutex.Unlock()
+			
+			fmt.Printf("%sChecked %d keys (%.2f keys/sec) - Last key: %s%s\n", ColorCyan, itCount, keysPerSecond, lastKeyHex, ColorReset)
 		}
 	}()
 	
@@ -126,6 +134,13 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 				// Increment key and iterations
 				currentKey.Add(currentKey, oneBI)
 				workerIterations++
+				
+				// Periodically update the last key checked
+				if workerIterations % 1000 == 0 {
+					lastKeyMutex.Lock()
+					lastKeyChecked.Set(currentKey)
+					lastKeyMutex.Unlock()
+				}
 				
 				// Update total iterations counter periodically
 				if workerIterations % 1000 == 0 {
