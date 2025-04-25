@@ -21,12 +21,6 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 	// Determine the limit for iterations to prevent infinite loops
 	diff := new(big.Int).Sub(maxKey, minKey)
 	limit := new(big.Int).Set(diff)
-	// Limit to a reasonable number if the range is too large
-	maxIterations := big.NewInt(1000000) // Limit to 1 million iterations
-	if diff.Cmp(maxIterations) > 0 {
-		limit = maxIterations
-		fmt.Printf("%sRange is very large, limiting to %s iterations%s\n", ColorYellow, maxIterations.String(), ColorReset)
-	}
 
 	// Variables for synchronization and tracking
 	var wg sync.WaitGroup
