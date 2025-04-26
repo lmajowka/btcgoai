@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"os"
@@ -10,13 +11,13 @@ import (
 )
 
 func main() {
-	// Load wallet addresses
-	walletAddresses, err := loadWalletAddresses()
+	// Load wallet hash160s
+	walletHash160s, err := loadWalletHash160s()
 	if err != nil {
-		fmt.Printf("%sError loading wallet addresses: %v%s\n", ColorRed, err, ColorReset)
+		fmt.Printf("%sError loading wallet hash160s: %v%s\n", ColorRed, err, ColorReset)
 		return
 	}
-	fmt.Printf("%sLoaded %d wallet addresses%s\n", ColorGreen, len(walletAddresses), ColorReset)
+	fmt.Printf("%sLoaded %d wallet hash160 values%s\n", ColorGreen, len(walletHash160s), ColorReset)
 
 	// Load ranges
 	ranges, err := loadRanges()
@@ -37,13 +38,13 @@ func main() {
 		return
 	}
 
-	// Get the wallet address for the selected number
+	// Get the wallet hash160 for the selected number
 	walletIndex := walletNum - 1
-	if walletIndex >= len(walletAddresses) {
+	if walletIndex >= len(walletHash160s) {
 		fmt.Printf("%sWallet index out of range.%s\n", ColorRed, ColorReset)
 		return
 	}
-	targetAddress := walletAddresses[walletIndex]
+	targetHash160 := walletHash160s[walletIndex]
 	
 	// Get the range for the selected wallet
 	if walletIndex >= len(ranges) {
@@ -52,7 +53,8 @@ func main() {
 	}
 	selectedRange := ranges[walletIndex]
 
-	fmt.Printf("%sSelected Wallet: %s%s%s\n", ColorYellow, ColorBoldYellow, targetAddress, ColorReset)
+	targetHash160Hex := hex.EncodeToString(targetHash160)
+	fmt.Printf("%sSelected Wallet Hash160: %s%s%s\n", ColorYellow, ColorBoldYellow, targetHash160Hex, ColorReset)
 	fmt.Printf("%sRange: min=%s%s%s, max=%s%s%s\n", ColorYellow, ColorBoldCyan, selectedRange.Min, ColorReset, ColorBoldCyan, selectedRange.Max, ColorReset)
 
 	// Convert hex strings to big int
@@ -61,7 +63,7 @@ func main() {
 	minKey.SetString(selectedRange.Min[2:], 16) // Remove 0x prefix
 	maxKey.SetString(selectedRange.Max[2:], 16) // Remove 0x prefix
 
-	searchForPrivateKey(minKey, maxKey, targetAddress)
+	searchForPrivateKey(minKey, maxKey, targetHash160)
 }
 
 

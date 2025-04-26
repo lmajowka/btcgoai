@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -10,9 +12,14 @@ import (
 	"time"
 )
 
-// searchForPrivateKey searches for a private key that corresponds to the target address
+// bytesEqual compares two byte slices for equality
+func bytesEqual(a, b []byte) bool {
+	return bytes.Equal(a, b)
+}
+
+// searchForPrivateKey searches for a private key that corresponds to the target hash160
 // within the given range (minKey to maxKey) using multiple goroutines
-func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
+func searchForPrivateKey(minKey, maxKey *big.Int, targetHash160 []byte) {
 	// Determine the number of goroutines to use based on available CPU cores
 	numCPU := runtime.NumCPU()
 	numWorkers := numCPU * 1 // Use 2x the number of CPUs for best performance
@@ -27,10 +34,23 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 	foundMatch := false
 	matchMutex := &sync.Mutex{}
 	var foundKey []byte
-	var foundAddress string
+	var foundHash160 []byte
 	var totalIterations int64 = 0
 	var lastKeyMutex sync.Mutex
 	lastKeyChecked := new(big.Int)
+	
+	// Generate a random starting point within the range
+	randomOffset, err := rand.Int(rand.Reader, diff)
+	if err != nil {
+		fmt.Printf("%sError generating random starting point: %v%s\n", ColorRed, err, ColorReset)
+		return
+	}
+	
+	// Calculate the new starting point by adding the random offset to minKey
+	randomStart := new(big.Int).Add(minKey, randomOffset)
+	fmt.Printf("%sStarting from random position within range...%s\n", ColorBlue, ColorReset)
+	randomStartHex := hex.EncodeToString(randomStart.Bytes())
+	fmt.Printf("%sRandom start point: %s%s%s\n", ColorCyan, ColorBoldCyan, randomStartHex, ColorReset)
 	
 	// Divide the keyspace into chunks for each worker
 	chunkSize := new(big.Int).Div(limit, big.NewInt(int64(numWorkers)))
@@ -78,8 +98,8 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 		go func(workerID int) {
 			defer wg.Done()
 			
-			// Calculate this worker's range
-			workerStart := new(big.Int).Set(minKey)
+			// Calculate this worker's range starting from the random point
+			workerStart := new(big.Int).Set(randomStart)
 			offset := new(big.Int).Mul(chunkSize, big.NewInt(int64(workerID)))
 			workerStart.Add(workerStart, offset)
 			
@@ -91,6 +111,15 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 				workerEnd.Set(maxKey)
 			}
 			
+			// Handle wrap-around if we exceed maxKey
+			if workerStart.Cmp(maxKey) > 0 {
+				// Wrap around to minKey plus the remainder
+				excess := new(big.Int).Sub(workerStart, maxKey)
+				excess.Sub(excess, big.NewInt(1))
+				workerStart.Set(minKey)
+				workerStart.Add(workerStart, excess)
+			}
+			
 			// Local variables for search
 			currentKey := new(big.Int).Set(workerStart)
 			oneBI := big.NewInt(1)
@@ -98,6 +127,10 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 			
 			// Main loop for this worker
 			for currentKey.Cmp(workerEnd) <= 0 {
+				// Handle wrap-around if we reach maxKey
+				if currentKey.Cmp(maxKey) > 0 {
+					currentKey.Set(minKey)
+				}
 				// Check if a match was already found by another worker
 				matchMutex.Lock()
 				if foundMatch {
@@ -109,21 +142,21 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 				// Convert current big int to private key
 				privateKeyBytes := padPrivateKey(currentKey.Bytes(), 32)
 				
-				// Generate address from private key
-				address, err := privateKeyToAddress(privateKeyBytes)
+				// Generate hash160 from private key
+				hash160, err := privateKeyToHash160(privateKeyBytes)
 				if err != nil {
-					fmt.Printf("%sWorker %d: Error generating address: %v%s\n", ColorRed, workerID, err, ColorReset)
+					fmt.Printf("%sWorker %d: Error generating hash160: %v%s\n", ColorRed, workerID, err, ColorReset)
 					return
 				}
 				
-				// Check if it matches the target address
-				if address == targetAddress {
+				// Check if it matches the target hash160
+				if bytesEqual(hash160, targetHash160) {
 					// We found a match!
 					matchMutex.Lock()
 					if !foundMatch { // Double check in case another worker just found it
 						foundMatch = true
 						foundKey = privateKeyBytes
-						foundAddress = address
+						foundHash160 = hash160
 						// Signal other goroutines
 						close(matchFound)
 					}
@@ -175,7 +208,8 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetAddress string) {
 		privateKeyHex := hex.EncodeToString(foundKey)
 		fmt.Printf("\n%sMATCH FOUND!%s\n", ColorBoldGreen, ColorReset)
 		fmt.Printf("%sPrivate Key: %s%s%s\n", ColorGreen, ColorBoldGreen, privateKeyHex, ColorReset)
-		fmt.Printf("%sAddress: %s%s%s\n", ColorGreen, ColorBoldGreen, foundAddress, ColorReset)
+		hash160Hex := hex.EncodeToString(foundHash160)
+		fmt.Printf("%sHash160: %s%s%s\n", ColorGreen, ColorBoldGreen, hash160Hex, ColorReset)
 	} else {
 		fmt.Printf("\n%sNo match found after checking approximately %d keys.%s\n", ColorYellow, atomic.LoadInt64(&totalIterations), ColorReset)
 	}

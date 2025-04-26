@@ -25,6 +25,17 @@ The program works as follows:
 3. Enter a wallet number between 1 and 160 when prompted
 4. The program will start searching for matching private keys
 
+## Compilation
+
+1. Ensure you have Go 1.18 or higher installed on your system
+2. Clone this repository or download the source code
+3. Navigate to the project directory
+4. Build the executable:
+   ```
+   go build -o bitcoin_finder.exe
+   ```
+5. The compiled executable will be created in the same directory
+
 ## Notes
 
 - Large ranges may take significant time to process

@@ -20,16 +20,29 @@ func padPrivateKey(key []byte, targetLength int) []byte {
 func privateKeyToAddress(privateKeyBytes []byte) (string, error) {
 	// Convert private key bytes to btcec private key
 	privateKey, _ := btcec.PrivKeyFromBytes(privateKeyBytes)
-	
+
 	// Get public key from private key
 	publicKey := privateKey.PubKey()
-	
+
 	// Convert public key to address
 	pubKeyHash := btcutil.Hash160(publicKey.SerializeCompressed())
 	address, err := btcutil.NewAddressPubKeyHash(pubKeyHash, &chaincfg.MainNetParams)
 	if err != nil {
 		return "", err
 	}
-	
+
 	return address.EncodeAddress(), nil
+}
+
+// privateKeyToHash160 converts a private key to a rim160 address
+func privateKeyToHash160(privateKeyBytes []byte) ([]byte, error) {
+	// Convert private key bytes to btcec private key
+	privateKey, _ := btcec.PrivKeyFromBytes(privateKeyBytes)
+
+	// Get public key from private key
+	publicKey := privateKey.PubKey()
+
+	// Convert public key to address
+	pubKeyHash := btcutil.Hash160(publicKey.SerializeCompressed())
+	return pubKeyHash, nil
 }
