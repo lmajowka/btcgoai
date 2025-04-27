@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -210,6 +211,16 @@ func searchForPrivateKey(minKey, maxKey *big.Int, targetHash160 []byte) {
 		fmt.Printf("%sPrivate Key: %s%s%s\n", ColorGreen, ColorBoldGreen, privateKeyHex, ColorReset)
 		hash160Hex := hex.EncodeToString(foundHash160)
 		fmt.Printf("%sHash160: %s%s%s\n", ColorGreen, ColorBoldGreen, hash160Hex, ColorReset)
+		
+		// Write the private key to a file
+		filename := "found_key_" + hash160Hex[:8] + ".txt"
+		content := fmt.Sprintf("Private Key: %s\nHash160: %s\nFound at: %s", privateKeyHex, hash160Hex, time.Now().Format(time.RFC3339))
+		err := os.WriteFile(filename, []byte(content), 0600)
+		if err != nil {
+			fmt.Printf("%sError writing key to file: %s%s\n", ColorRed, err, ColorReset)
+		} else {
+			fmt.Printf("%sPrivate key saved to file: %s%s%s\n", ColorGreen, ColorBoldGreen, filename, ColorReset)
+		}
 	} else {
 		fmt.Printf("\n%sNo match found after checking approximately %d keys.%s\n", ColorYellow, atomic.LoadInt64(&totalIterations), ColorReset)
 	}
