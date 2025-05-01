@@ -384,6 +384,9 @@ fn process_chunk_with_fallback(
                  crate::colors::BLUE, num_subchunks, crate::colors::RESET);
         
         let mut current = min_key.clone();
+        let start_time = std::time::Instant::now();
+        let keys_checked_before = crate::performance::get_keys_checked();
+        let mut last_update = start_time;
         
         for i in 0..num_subchunks.to_u64().unwrap_or(1) {
             let subchunk_end = if i == num_subchunks.to_u64().unwrap_or(1) - 1 {
@@ -391,6 +394,25 @@ fn process_chunk_with_fallback(
             } else {
                 current.clone() + subchunk_size.clone()
             };
+            
+            // Mostrar progresso atual mais frequentemente
+            let current_time = std::time::Instant::now();
+            if current_time.duration_since(last_update).as_secs() >= 3 {
+                let keys_checked_now = crate::performance::get_keys_checked();
+                let keys_since_start = keys_checked_now - keys_checked_before;
+                let elapsed = current_time.duration_since(start_time).as_secs_f64();
+                let speed = if elapsed > 0.0 { keys_since_start as f64 / elapsed } else { 0.0 };
+                
+                println!("{}Progresso: subchunk {}/{} ({:.2}%) | {:.2}M chaves/s | {} chaves verificadas{}", 
+                         crate::colors::CYAN, 
+                         i+1, num_subchunks, 
+                         (i+1) as f64 / num_subchunks.to_u64().unwrap_or(1) as f64 * 100.0,
+                         speed / 1_000_000.0,
+                         keys_since_start,
+                         crate::colors::RESET);
+                         
+                last_update = current_time;
+            }
             
             println!("{}CPU sub-chunk {}/{}{}", 
                      crate::colors::BLUE, i+1, num_subchunks, crate::colors::RESET);
@@ -421,11 +443,46 @@ fn search_key_range_cpu(
     // Use the optimized CPU approach
     let mut current_key = min_key.clone();
     
+    // Setup progress reporting
+    let start_time = std::time::Instant::now();
+    let mut last_update = start_time;
+    let keys_checked_before = crate::performance::get_keys_checked();
+    let range_size = max_key - min_key;
+    let range_size_f64 = range_size.to_f64().unwrap_or(f64::MAX);
+    
     // Process keys in batches
     let mut keys_buffer = Vec::with_capacity(batch_size);
     let increment = BigUint::from(batch_size);
     
     while current_key <= *max_key {
+        // Check if we should update progress
+        let current_time = std::time::Instant::now();
+        if current_time.duration_since(last_update).as_secs() >= 3 {
+            let keys_checked_now = crate::performance::get_keys_checked();
+            let keys_since_start = keys_checked_now - keys_checked_before;
+            let elapsed = current_time.duration_since(start_time).as_secs_f64();
+            let speed = if elapsed > 0.0 { keys_since_start as f64 / elapsed } else { 0.0 };
+            
+            // Calculate progress if possible
+            let current_diff = &current_key - min_key;
+            let progress_pct = if range_size_f64 != f64::MAX && range_size_f64 > 0.0 {
+                current_diff.to_f64().unwrap_or(0.0) / range_size_f64 * 100.0
+            } else {
+                0.0
+            };
+            
+            println!("{}Progresso CPU: {:.2}% | {:.2}M chaves/s | {} chaves verificadas | {} de {}{}", 
+                     crate::colors::CYAN, 
+                     progress_pct,
+                     speed / 1_000_000.0,
+                     keys_since_start,
+                     current_key.to_str_radix(16),
+                     max_key.to_str_radix(16),
+                     crate::colors::RESET);
+                     
+            last_update = current_time;
+        }
+        
         // Clear the buffer for this batch
         keys_buffer.clear();
         
@@ -852,4 +909,26 @@ fn process_chunk_cpu(
         // Move to the next batch
         current_key = batch_end;
     }
+}
+
+/// Cria chunks de busca para processamento paralelo
+pub fn create_search_chunks(min_key: BigUint, max_key: BigUint, num_chunks: usize) -> Vec<(BigUint, BigUint)> {
+    let range_size = max_key.clone() - min_key.clone();
+    let chunk_size = range_size.clone() / BigUint::from(num_chunks);
+    
+    let mut chunks = Vec::with_capacity(num_chunks);
+    let mut current = min_key.clone();
+    
+    for i in 0..num_chunks {
+        let next = if i == num_chunks - 1 {
+            max_key.clone()
+        } else {
+            current.clone() + chunk_size.clone()
+        };
+        
+        chunks.push((current.clone(), next.clone()));
+        current = next + BigUint::from(1u32);
+    }
+    
+    chunks
 } 

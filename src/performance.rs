@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{Ordering};
 use sysinfo::{System, SystemExt, CpuExt};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
@@ -9,8 +9,6 @@ use num_cpus;
 // Detecção de instruções SIMD
 #[cfg(target_arch = "x86")]
 use std::arch::x86::*;
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
 
 // Estrutura para armazenar informações sobre recursos do sistema
 pub struct SystemResources {

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 // Add libc for OpenCL sizes
 extern crate libc;
@@ -112,56 +112,24 @@ const CL_TRUE: cl_bool = 1;
 const CL_FALSE: cl_bool = 0;
 
 /// Checks if OpenCL is available on the system
+#[cfg(feature = "opencl")]
 pub fn check_opencl_availability() -> bool {
-    // If OpenCL support isn't compiled in, it's definitely not available
-    #[cfg(not(feature = "opencl"))]
-    return false;
-
     #[cfg(feature = "opencl")]
     {
-        // If we've already checked, return the cached result
-        let current = OPENCL_AVAILABLE.load(Ordering::Relaxed);
-        if current {
-            return true;
-        }
-
-        // Try to check for OpenCL availability
-        // First by using the opencl3 library
-        match get_platforms() {
-            Ok(platforms) => {
-                if !platforms.is_empty() {
-                    // Found at least one platform
-                    OPENCL_AVAILABLE.store(true, Ordering::Relaxed);
-                    return true;
+        use libloading::Library;
+        match unsafe { Library::new("OpenCL") } {
+            Ok(_) => return true,
+            Err(_) => {
+                match unsafe { Library::new("OpenCL.dll") } {
+                    Ok(_) => return true,
+                    Err(_) => return false
                 }
             }
-            Err(_) => {
-                // Failed to get platforms, try dynamic loading
-            }
         }
-
-        // If opencl3 failed, try dynamic loading as a fallback
-        use libloading::{Library, Symbol};
-        
-        let lib_names = if cfg!(target_os = "windows") {
-            vec!["OpenCL.dll"]
-        } else if cfg!(target_os = "macos") {
-            vec!["libOpenCL.dylib", "/System/Library/Frameworks/OpenCL.framework/OpenCL"]
-        } else {
-            vec!["libOpenCL.so", "libOpenCL.so.1"]
-        };
-        
-        for lib_name in lib_names {
-            if let Ok(_) = unsafe { Library::new(lib_name) } {
-                // Successfully loaded the library
-                OPENCL_AVAILABLE.store(true, Ordering::Relaxed);
-                return true;
-            }
-        }
-
-        // If we get here, OpenCL is not available
-        false
     }
+    
+    #[cfg(not(feature = "opencl"))]
+    false
 }
 
 /// GPU-based private key searcher
@@ -454,7 +422,7 @@ impl GpuSearcher {
     fn safe_gpu_search(
         &self,
         target_hash: &[u8; 20],
-        target_count: usize,
+        _target_count: usize,
         range_start: u64,
         range_end: u64,
         batch_size: usize
@@ -480,165 +448,145 @@ impl GpuSearcher {
             return Ok(vec![]);
         }
         
-        // Calculate work size with upper limit based on device capabilities
-        let range_size = range_end - range_start;
-        let adjusted_batch_size = std::cmp::min(batch_size, 65536); // Max of 65536 keys per batch
+        // Calculate workload distribution
+        let _range_size = range_end - range_start;
         
         // Create buffer for target hash
-        let target_buffer = unsafe {
-            create_buffer(
-                context.get(),
-                CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                std::mem::size_of::<u8>() * 20, // 20 bytes for a single hash160
-                target_hash.as_ptr() as *mut std::ffi::c_void
-            )
-            .map_err(|e| format!("Failed to create target buffer: {}", e))?
-        };
+        let target_buffer = create_buffer(
+            context.get(),
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            std::mem::size_of::<u8>() * 20, // 20 bytes for a single hash160
+            target_hash.as_ptr() as *mut std::ffi::c_void
+        )
+        .map_err(|e| format!("Failed to create target buffer: {}", e))?;
         
         // Create buffer for found keys (max 100 results)
-        let result_keys_buffer = unsafe {
-            create_buffer(
-                context.get(),
-                CL_MEM_WRITE_ONLY,
-                std::mem::size_of::<u64>() * 100,
-                std::ptr::null_mut()
-            )
-            .map_err(|e| format!("Failed to create result keys buffer: {}", e))?
-        };
+        let result_keys_buffer = create_buffer(
+            context.get(),
+            CL_MEM_WRITE_ONLY,
+            std::mem::size_of::<u64>() * 100,
+            std::ptr::null_mut()
+        )
+        .map_err(|e| format!("Failed to create result keys buffer: {}", e))?;
         
         // Create buffer for result count
-        let count_buffer = unsafe {
-            create_buffer(
-                context.get(),
-                CL_MEM_READ_WRITE,
-                std::mem::size_of::<u32>(),
-                std::ptr::null_mut()
-            )
-            .map_err(|e| format!("Failed to create count buffer: {}", e))?
-        };
+        let count_buffer = create_buffer(
+            context.get(),
+            CL_MEM_READ_WRITE,
+            std::mem::size_of::<u32>(),
+            std::ptr::null_mut()
+        )
+        .map_err(|e| format!("Failed to create count buffer: {}", e))?;
         
         // Initialize the count buffer to zero
         let zero: u32 = 0;
-        unsafe {
-            enqueue_write_buffer(
-                queue.get(),
-                count_buffer,
-                CL_TRUE,
-                0,
-                std::mem::size_of::<u32>(),
-                &zero as *const u32 as *const std::ffi::c_void,
-                0,
-                std::ptr::null()
-            )
-            .map_err(|e| format!("Failed to initialize count buffer: {}", e))?
-        };
+        enqueue_write_buffer(
+            queue.get(),
+            count_buffer,
+            CL_TRUE,
+            0,
+            std::mem::size_of::<u32>(),
+            &zero as *const u32 as *const std::ffi::c_void,
+            0,
+            std::ptr::null()
+        )
+        .map_err(|e| format!("Failed to initialize count buffer: {}", e))?;
         
         // Create kernel
         use std::ffi::CString;
         let kernel_name = CString::new("search_keys").unwrap();
         
         // Create the kernel
-        let kernel = unsafe {
-            // Get the raw program pointer using transmute (this is unsafe but necessary)
-            let program_ptr = program as *const Program as *mut std::ffi::c_void;
-            
-            // Create kernel using the raw pointer
-            let kernel_ptr = create_kernel(
-                program_ptr, kernel_name.as_c_str())
-                .map_err(|e| format!("Failed to create kernel: {}", e))?;
-            
-            Kernel::new(kernel_ptr)
-                .map_err(|e| format!("Failed to create kernel object: {}", e))?
-        };
+        let kernel_ptr = create_kernel(
+            program as *const Program as *mut std::ffi::c_void,
+            kernel_name.as_c_str()
+        )
+        .map_err(|e| format!("Failed to create kernel: {}", e))?;
+        
+        // Create the kernel object
+        let kernel = Kernel::new(kernel_ptr)
+            .map_err(|e| format!("Failed to create kernel object: {}", e))?;
         
         // Set kernel arguments
-        unsafe {
-            // Set arguments based on the updated kernel signature
-            kernel.set_arg(0, &cl_mem::from(target_buffer))
-                .map_err(|e| format!("Failed to set target_buffer arg: {}", e))?;
-            
-            kernel.set_arg(1, &cl_mem::from(result_keys_buffer))
-                .map_err(|e| format!("Failed to set result_keys_buffer arg: {}", e))?;
-            
-            kernel.set_arg(2, &cl_mem::from(count_buffer))
-                .map_err(|e| format!("Failed to set count_buffer arg: {}", e))?;
-            
-            let targets_len: u32 = 1; // We're only using a single target
-            
-            kernel.set_arg(3, &targets_len)
-                .map_err(|e| format!("Failed to set targets_len arg: {}", e))?;
-            
-            kernel.set_arg(4, &range_start)
-                .map_err(|e| format!("Failed to set range_start arg: {}", e))?;
-            
-            kernel.set_arg(5, &range_end)
-                .map_err(|e| format!("Failed to set range_end arg: {}", e))?;
-        }
+        kernel.set_arg(0, &cl_mem::from(target_buffer))
+            .map_err(|e| format!("Failed to set target_buffer arg: {}", e))?;
+        
+        kernel.set_arg(1, &cl_mem::from(result_keys_buffer))
+            .map_err(|e| format!("Failed to set result_keys_buffer arg: {}", e))?;
+        
+        kernel.set_arg(2, &cl_mem::from(count_buffer))
+            .map_err(|e| format!("Failed to set count_buffer arg: {}", e))?;
+        
+        let targets_len: u32 = 1; // We're only using a single target
+        
+        kernel.set_arg(3, &targets_len)
+            .map_err(|e| format!("Failed to set targets_len arg: {}", e))?;
+        
+        kernel.set_arg(4, &range_start)
+            .map_err(|e| format!("Failed to set range_start arg: {}", e))?;
+        
+        kernel.set_arg(5, &range_end)
+            .map_err(|e| format!("Failed to set range_end arg: {}", e))?;
         
         // Calculate appropriate work sizes based on range size
-        let global_work_size = std::cmp::min(adjusted_batch_size, 65536); // Limit work size
+        let global_work_size = std::cmp::min(batch_size, 65536); // Limit work size
         let local_work_size = std::cmp::min(256, global_work_size); // Use 256 threads per work group or less
         
         println!("GPU: Executing kernel with {} work items (local size: {})", 
                  global_work_size, local_work_size);
         
         // Execute the kernel
-        unsafe {
-            enqueue_nd_range_kernel(
-                queue.get(),
-                kernel.get(),
-                1,
-                std::ptr::null(),
-                &global_work_size as *const usize as *const libc::size_t,
-                &local_work_size as *const usize as *const libc::size_t,
-                0,
-                std::ptr::null()
-            )
-            .map_err(|e| format!("Failed to enqueue kernel: {}", e))?
-        };
+        enqueue_nd_range_kernel(
+            queue.get(),
+            kernel.get(),
+            1,
+            std::ptr::null(),
+            &global_work_size as *const usize as *const libc::size_t,
+            &local_work_size as *const usize as *const libc::size_t,
+            0,
+            std::ptr::null()
+        )
+        .map_err(|e| format!("Failed to enqueue kernel: {}", e))?;
         
         // Read result count
         let mut count: u32 = 0;
-        unsafe {
-            enqueue_read_buffer(
-                queue.get(),
-                count_buffer,
-                CL_TRUE,
-                0,
-                std::mem::size_of::<u32>(),
-                &mut count as *mut u32 as *mut std::ffi::c_void,
-                0,
-                std::ptr::null()
-            )
-            .map_err(|e| format!("Failed to read count: {}", e))?
-        };
+        enqueue_read_buffer(
+            queue.get(),
+            count_buffer,
+            CL_TRUE,
+            0,
+            std::mem::size_of::<u32>(),
+            &mut count as *mut u32 as *mut std::ffi::c_void,
+            0,
+            std::ptr::null()
+        )
+        .map_err(|e| format!("Failed to read count: {}", e))?;
         
         println!("GPU: Found {} potential results", count);
         
-        // Read results
+        // Read the results if any were found
         let mut results = vec![0u64; std::cmp::min(count as usize, 100)]; // Limit to max 100 results
         if count > 0 {
-            unsafe {
-                enqueue_read_buffer(
-                    queue.get(),
-                    result_keys_buffer,
-                    CL_TRUE,
-                    0,
-                    std::mem::size_of::<u64>() * results.len(),
-                    results.as_mut_ptr() as *mut std::ffi::c_void,
-                    0,
-                    std::ptr::null()
-                )
-                .map_err(|e| format!("Failed to read results: {}", e))?
-            };
+            enqueue_read_buffer(
+                queue.get(),
+                result_keys_buffer,
+                CL_TRUE,
+                0,
+                std::mem::size_of::<u64>() * results.len(),
+                results.as_mut_ptr() as *mut std::ffi::c_void,
+                0,
+                std::ptr::null_mut()
+            )
+            .map_err(|e| format!("Failed to read results: {}", e))?;
+        } else {
+            // No results found
+            results.clear();
         }
         
         // Cleanup
-        unsafe {
-            release_mem_object(target_buffer).ok();
-            release_mem_object(result_keys_buffer).ok();
-            release_mem_object(count_buffer).ok();
-        }
+        release_mem_object(target_buffer).ok();
+        release_mem_object(result_keys_buffer).ok();
+        release_mem_object(count_buffer).ok();
         
         Ok(results)
     }

@@ -14,12 +14,11 @@ mod performance;
 mod gpu;
 
 use std::io::{self, BufRead, Write};
-use std::fs::File;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use hex;
-use rand::{self, Rng};
-use chrono::Local;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[cfg(feature = "opencl")]
 use crate::gpu::check_opencl_availability;
@@ -166,7 +165,7 @@ fn main() {
 
     // Se o usuário escolheu GPU, selecionar o dispositivo
     #[cfg(feature = "opencl")]
-    let gpu_searcher = if use_gpu {
+    let gpu_searcher: OptionalGpuSearcher = if use_gpu {
         let mut searcher = gpu_searcher.unwrap();
         let devices = searcher.list_devices();
         
@@ -276,18 +275,20 @@ fn main() {
              colors::GREEN, params.batch_size, colors::RESET);
     
     // Velocidade estimada baseada nas capacidades do hardware
-    let mut est_keys_per_sec = performance::estimate_search_speed(&resources, &params);
+    let base_keys_per_sec = performance::estimate_search_speed(&resources, &params);
     
     // Ajuste da estimativa de velocidade se usando GPU
-    if gpu_searcher.is_some() {
+    let (est_keys_per_sec, gpu_searcher) = if gpu_searcher.is_some() {
         // As GPUs geralmente são 10-100x mais rápidas para este tipo de operação
-        est_keys_per_sec *= 20; // Multiplicador conservador
+        let gpu_adjusted_speed = base_keys_per_sec * 20; // Multiplicador conservador
         println!("{}Velocidade estimada com GPU: {:.2} M chaves/s{}\n", 
-                colors::GREEN, est_keys_per_sec as f64 / 1_000_000.0, colors::RESET);
+                colors::GREEN, gpu_adjusted_speed as f64 / 1_000_000.0, colors::RESET);
+        (gpu_adjusted_speed, gpu_searcher)
     } else {
         println!("{}Velocidade estimada: {:.2} M chaves/s{}\n", 
-                colors::GREEN, est_keys_per_sec as f64 / 1_000_000.0, colors::RESET);
-    }
+                colors::GREEN, base_keys_per_sec as f64 / 1_000_000.0, colors::RESET);
+        (base_keys_per_sec, None)
+    };
     
     // Menu principal com 3 opções claras
     println!("{}Modos disponíveis:{}", colors::BOLD_YELLOW, colors::RESET);
@@ -322,10 +323,10 @@ fn main() {
         2 => run_training_mode(&params, est_keys_per_sec, gpu_searcher),
         3 => run_range_test_mode(&params, est_keys_per_sec),
         _ => run_normal_mode(&params, est_keys_per_sec, gpu_searcher), // Fallback para modo normal
-    }
+    };
 }
 
-fn run_training_mode(params: &performance::SearchParameters, est_keys_per_sec: u64, gpu_searcher: OptionalGpuSearcher) {
+fn run_training_mode(params: &performance::SearchParameters, est_keys_per_sec: u64, gpu_searcher: OptionalGpuSearcher) -> Option<String> {
     println!("{}Modo Treinamento - Bitcoin Puzzles conhecidos{}", colors::BOLD_GREEN, colors::RESET);
     println!("{}Neste modo, vamos buscar chaves privadas já conhecidas para validar o funcionamento do sistema.{}", 
              colors::YELLOW, colors::RESET);
@@ -335,7 +336,7 @@ fn run_training_mode(params: &performance::SearchParameters, est_keys_per_sec: u
         Some(p) => p,
         None => {
             println!("{}Erro ao carregar puzzles de treinamento.{}", colors::RED, colors::RESET);
-            return;
+            return None;
         }
     };
     
@@ -356,12 +357,18 @@ fn run_training_mode(params: &performance::SearchParameters, est_keys_per_sec: u
     if index == 0 {
         // Executar todos os puzzles em ordem de dificuldade
         run_all_training_puzzles(&puzzles, params, est_keys_per_sec, gpu_searcher);
+        None
     } else if index <= puzzles.len() {
         // Executar apenas o puzzle selecionado
         let puzzle = &puzzles[index-1];
-        run_single_training_puzzle(puzzle, params, est_keys_per_sec, gpu_searcher);
+        if run_single_training_puzzle(puzzle, params, est_keys_per_sec, gpu_searcher) {
+            Some(puzzle.private_key.clone())
+        } else {
+            None
+        }
     } else {
         println!("{}Seleção inválida.{}", colors::RED, colors::RESET);
+        None
     }
 }
 
@@ -369,7 +376,7 @@ fn run_all_training_puzzles(
     puzzles: &[bitcoin_puzzle_test::TestPuzzle], 
     params: &performance::SearchParameters, 
     est_keys_per_sec: u64,
-    mut gpu_searcher: OptionalGpuSearcher
+    gpu_searcher: OptionalGpuSearcher
 ) {
     let mut success_count = 0;
     let start_time = std::time::Instant::now();
@@ -598,7 +605,7 @@ fn find_training_puzzles() -> Option<Vec<bitcoin_puzzle_test::TestPuzzle>> {
     Some(puzzles)
 }
 
-fn run_range_test_mode(params: &performance::SearchParameters, est_keys_per_sec: u64) {
+fn run_range_test_mode(params: &performance::SearchParameters, est_keys_per_sec: u64) -> Option<String> {
     println!("{}Modo de TESTE DE RANGES ativado - Verificando intervalos dos puzzles não resolvidos{}", colors::BOLD_GREEN, colors::RESET);
     
     // Carregar os puzzles Bitcoin não resolvidos
@@ -607,7 +614,7 @@ fn run_range_test_mode(params: &performance::SearchParameters, est_keys_per_sec:
         Ok(_) => (),
         Err(err) => {
             println!("{}Erro ao converter endereços para hash160: {}{}", colors::RED, err, colors::RESET);
-            return;
+            return None;
         }
     }
     println!("{}Carregados {} puzzles não resolvidos{}", colors::GREEN, puzzles.len(), colors::RESET);
@@ -648,7 +655,7 @@ fn run_range_test_mode(params: &performance::SearchParameters, est_keys_per_sec:
         _ => {
             println!("{}Falha ao ler entrada. Cancelando operação.{}", 
                      colors::YELLOW, colors::RESET);
-            return;
+            return None;
         }
     };
     
@@ -657,7 +664,7 @@ fn run_range_test_mode(params: &performance::SearchParameters, est_keys_per_sec:
         _ => {
             println!("{}Escolha inválida. Por favor, escolha um número entre 1 e {}.{}", 
                      colors::RED, puzzles.len(), colors::RESET);
-            return;
+            return None;
         }
     };
 
@@ -718,7 +725,8 @@ fn run_range_test_mode(params: &performance::SearchParameters, est_keys_per_sec:
     println!("{}Tamanho do intervalo: {}{}", colors::CYAN, range_size.to_string(), colors::RESET);
     
     // Visualização da distribuição de trabalho
-    let chunks = performance::optimize_workload_distribution(&min_key, &max_key, params);
+    let num_chunks = params.threads; // Usar o número de threads como número de chunks
+    let chunks = search::create_search_chunks(min_key.clone(), max_key.clone(), num_chunks);
     println!("\n{}Estratégia de distribuição de trabalho otimizada:{}", colors::BOLD_YELLOW, colors::RESET);
     println!("{}Número de chunks para processamento paralelo: {}{}", colors::CYAN, chunks.len(), colors::RESET);
     
@@ -726,113 +734,131 @@ fn run_range_test_mode(params: &performance::SearchParameters, est_keys_per_sec:
              colors::BOLD_YELLOW, colors::RESET);
     println!("{}Para iniciar uma busca real neste puzzle, use o Modo Normal (opção 1).{}", 
              colors::YELLOW, colors::RESET);
+             
+    None
 }
 
-fn run_normal_mode(params: &performance::SearchParameters, est_keys_per_sec: u64, gpu_searcher: OptionalGpuSearcher) {
+fn run_normal_mode(params: &performance::SearchParameters, est_keys_per_sec: u64, gpu_searcher: OptionalGpuSearcher) -> Option<String> {
     println!("\n{}Modo Normal - Bitcoin Puzzle TX{}", colors::BOLD_GREEN, colors::RESET);
     
     // Carregar puzzles
-    let puzzles = bitcoin_puzzle::load_puzzles();
-    if puzzles.is_empty() {
-        println!("{}Não foram encontrados puzzles. Verifique os arquivos de dados.{}", 
-                 colors::RED, colors::RESET);
-        return;
-    }
-    
-    // Mostrar lista de puzzles disponíveis
-    println!("\n{}Puzzles disponíveis:{}", colors::BOLD_CYAN, colors::RESET);
-    for (i, puzzle) in puzzles.iter().enumerate() {
-        println!("{}{}. Dificuldade: {} bits | Endereço: {}{}", 
-                 colors::CYAN, i+1, puzzle.bits, puzzle.address, colors::RESET);
-    }
-    
-    // Permitir ao usuário escolher um puzzle
-    let selected_idx = loop {
-        print!("Escolha um puzzle para resolver (1-{}): ", puzzles.len());
-        io::stdout().flush().unwrap();
-        
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(_) => {
-                match input.trim().parse::<usize>() {
-                    Ok(num) if num >= 1 && num <= puzzles.len() => break num - 1,
-                    _ => println!("{}Opção inválida, tente novamente.{}", colors::RED, colors::RESET)
-                }
-            },
-            Err(_) => println!("{}Erro ao ler entrada, tente novamente.{}", colors::RED, colors::RESET)
+    let puzzles = match load_bitcoin_puzzles() {
+        Ok(p) => p,
+        Err(e) => {
+            println!("{}Erro ao carregar puzzles: {}{}", colors::RED, e, colors::RESET);
+            return None;
         }
     };
     
-    let selected_puzzle = &puzzles[selected_idx];
+    if puzzles.is_empty() {
+        println!("{}Não foram encontrados puzzles. Verifique os arquivos de dados.{}", 
+                 colors::RED, colors::RESET);
+        return None;
+    }
+    
+    // Exibir puzzles disponíveis
+    print_puzzles(&puzzles);
+    
+    // Selecionar puzzle
+    let puzzle_index = select_puzzle_index(&puzzles);
+    let selected_puzzle = &puzzles[puzzle_index];
     
     println!("\n{}Puzzle selecionado:{}", colors::BOLD_GREEN, colors::RESET);
-    println!("{}Dificuldade: {} bits{}", colors::CYAN, selected_puzzle.bits, colors::RESET);
-    println!("{}Endereço Bitcoin: {}{}", colors::CYAN, selected_puzzle.address, colors::RESET);
-    println!("{}Hash160: {}{}", colors::CYAN, hex::encode(&selected_puzzle.hash160), colors::RESET);
+    println!("{}Dificuldade: {} bits", colors::GREEN, selected_puzzle.bits);
+    println!("Endereço Bitcoin: {}", selected_puzzle.address);
+    println!("Hash160: {}{}", hex::encode(&selected_puzzle.hash160), colors::RESET);
     
-    // Definir o intervalo de busca com base na dificuldade
-    let max_range = BigUint::from(1u8) << selected_puzzle.bits;
-    let min_key = BigUint::from(0u8);
+    // Calcular intervalo de busca
+    let (min_key, max_key) = get_search_range(selected_puzzle.bits);
     
-    println!("\n{}Intervalo de busca:{}", colors::YELLOW, colors::RESET);
-    println!("{}De: 0{}", colors::CYAN, colors::RESET);
-    println!("{}Até: {} (2^{}){}", colors::CYAN, max_range, selected_puzzle.bits, colors::RESET);
+    println!("\n{}Intervalo de busca:{}", colors::BOLD_CYAN, colors::RESET);
+    println!("{}De: {}", colors::CYAN, min_key);
+    println!("Até: {} (2^{}){}", max_key, selected_puzzle.bits, colors::RESET);
     
-    // Calcular estimativa de tempo
-    let range_size = max_range.to_f64().unwrap_or(f64::MAX);
-    let estimated_time = range_size / est_keys_per_sec as f64;
+    // Estimar tempo
+    let key_range = max_key.clone() - min_key.clone();
+    let key_range_f64 = key_range.to_f64().unwrap_or(f64::MAX);
+    let est_secs = key_range_f64 / est_keys_per_sec as f64;
     
-    // Formatar tempo estimado
-    let time_str = if estimated_time < 60.0 {
-        format!("{:.2} segundos", estimated_time)
-    } else if estimated_time < 3600.0 {
-        format!("{:.2} minutos", estimated_time / 60.0)
-    } else if estimated_time < 86400.0 {
-        format!("{:.2} horas", estimated_time / 3600.0)
-    } else if estimated_time < 31536000.0 {
-        format!("{:.2} dias", estimated_time / 86400.0)
-    } else {
-        format!("{:.2} anos", estimated_time / 31536000.0)
-    };
+    let est_years = est_secs / (60.0 * 60.0 * 24.0 * 365.25);
+    println!("\n{}Estimativa de tempo: {:.2} anos{}", 
+             if est_years > 100.0 { colors::RED } else { colors::YELLOW }, 
+             est_years, colors::RESET);
     
-    println!("\n{}Estimativa de tempo: {}{}", colors::YELLOW, time_str, colors::RESET);
-    
-    // Confirmar se o usuário deseja continuar
-    print!("Deseja continuar com a busca? (S/N): ");
-    io::stdout().flush().unwrap();
-    
+    // Confirmar busca
+    println!("{}Deseja continuar com a busca? (S/N): {}", colors::BOLD_WHITE, colors::RESET);
     let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap_or(0);
+    std::io::stdin().read_line(&mut input).expect("Falha ao ler input");
     
     if !["s", "S", "sim", "Sim", "SIM"].contains(&input.trim()) {
         println!("{}Busca cancelada pelo usuário.{}", colors::YELLOW, colors::RESET);
-        return;
+        return None;
     }
     
-    // Criar chunks para processamento paralelo
-    let chunks = performance::optimize_workload_distribution(&min_key, &max_range, params);
+    // Dividir em chunks
+    let chunks = search::create_search_chunks(min_key, max_key, params.threads);
+    println!("Iniciando busca com {} chunks...", chunks.len());
     
-    println!("{}Iniciando busca com {} chunks...{}", 
-             colors::GREEN, chunks.len(), colors::RESET);
-    
-    // Reset counter
+    // Resetar contadores
     performance::reset_keys_checked();
     
+    // Thread de progresso para mostrar informações enquanto a busca é executada
+    let show_progress = Arc::new(AtomicBool::new(true));
+    let show_progress_clone = show_progress.clone();
+    let range_bits = selected_puzzle.bits;
+
+    let progress_thread = std::thread::spawn(move || {
+        let start_time = std::time::Instant::now();
+        let mut last_keys_checked = 0;
+        let mut last_check_time = start_time;
+        
+        while show_progress_clone.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            
+            let current_time = std::time::Instant::now();
+            let total_keys_checked = performance::get_keys_checked();
+            let time_diff = current_time.duration_since(last_check_time).as_secs_f64();
+            
+            if time_diff > 0.0 {
+                let keys_per_second = (total_keys_checked - last_keys_checked) as f64 / time_diff;
+                let total_time = current_time.duration_since(start_time).as_secs_f64();
+                let overall_speed = if total_time > 0.0 { total_keys_checked as f64 / total_time } else { 0.0 };
+                
+                print!("\r\x1b[K");  // Limpa a linha atual
+                print!("{}[{}] {:.2}M chaves/s | {:.2}M média | Total: {} chaves ({:.6}%){}", 
+                       colors::CYAN,
+                       chrono::Local::now().format("%H:%M:%S"),
+                       keys_per_second / 1_000_000.0,
+                       overall_speed / 1_000_000.0,
+                       total_keys_checked,
+                       if range_bits > 0 { total_keys_checked as f64 / (2.0_f64.powf(range_bits as f64)) * 100.0 } else { 0.0 },
+                       colors::RESET);
+                std::io::stdout().flush().unwrap();
+                
+                last_keys_checked = total_keys_checked;
+                last_check_time = current_time;
+            }
+        }
+    });
+
     // Realizar a busca com parâmetros otimizados e possível aceleração por GPU
     let result = search::search_for_private_key_optimized(&chunks, &selected_puzzle.hash160, params.batch_size, gpu_searcher);
     
+    // Parar o thread de progresso
+    show_progress.store(false, Ordering::Relaxed);
+    let _ = progress_thread.join();
+    
     // Processar o resultado
-    if let Some(found_key_hex) = result {
-        println!("\n{}CHAVE ENCONTRADA!{}", colors::BOLD_GREEN, colors::RESET);
+    if let Some(found_key_hex) = &result {
+        println!("\n\n{}CHAVE ENCONTRADA!{}", colors::BOLD_GREEN, colors::RESET);
         println!("{}Chave privada (hex): {}{}", colors::GREEN, found_key_hex, colors::RESET);
         
-        // BitcoinPuzzle doesn't have a private_key field for real puzzles, so we can't compare
-        // Just report the found key
+        // BitcoinPuzzle não tem o campo private_key para puzzles reais
         println!("{}VERIFICAÇÃO: A chave privada foi encontrada mas não pode ser validada (puzzle real).{}", 
                 colors::BOLD_YELLOW, colors::RESET);
         
         // Converter a chave hex para formato binário
-        if let Ok(key_bytes) = hex::decode(&found_key_hex) {
+        if let Ok(key_bytes) = hex::decode(found_key_hex) {
             // Criar WIF e endereço
             match bitcoin::private_key_to_wif(&key_bytes) {
                 Ok(wif) => println!("{}Chave privada (WIF): {}{}", colors::GREEN, wif, colors::RESET),
@@ -847,7 +873,52 @@ fn run_normal_mode(params: &performance::SearchParameters, est_keys_per_sec: u64
             println!("{}Erro ao decodificar a chave hexadecimal{}", colors::RED, colors::RESET);
         }
     } else {
-        println!("\n{}Busca concluída. Chave privada não encontrada neste intervalo.{}", 
+        println!("\n\n{}Busca concluída. Chave privada não encontrada neste intervalo.{}", 
                colors::RED, colors::RESET);
     }
+    
+    result
+}
+
+// Carregar os puzzles do Bitcoin
+fn load_bitcoin_puzzles() -> Result<Vec<bitcoin_puzzle::BitcoinPuzzle>, String> {
+    match bitcoin_puzzle::load_puzzles() {
+        puzzles if !puzzles.is_empty() => Ok(puzzles),
+        _ => Err("Nenhum puzzle encontrado".to_string())
+    }
+}
+
+// Exibir puzzles disponíveis
+fn print_puzzles(puzzles: &[bitcoin_puzzle::BitcoinPuzzle]) {
+    println!("\n{}Puzzles disponíveis:{}", colors::BOLD_CYAN, colors::RESET);
+    for (i, puzzle) in puzzles.iter().enumerate() {
+        println!("{}{}. Dificuldade: {} bits | Endereço: {}{}", 
+                colors::CYAN, i+1, puzzle.bits, puzzle.address, colors::RESET);
+    }
+}
+
+// Permitir ao usuário selecionar um puzzle
+fn select_puzzle_index(puzzles: &[bitcoin_puzzle::BitcoinPuzzle]) -> usize {
+    loop {
+        print!("Escolha um puzzle para resolver (1-{}): ", puzzles.len());
+        std::io::stdout().flush().unwrap();
+        
+        let mut input = String::new();
+        match std::io::stdin().read_line(&mut input) {
+            Ok(_) => {
+                match input.trim().parse::<usize>() {
+                    Ok(num) if num >= 1 && num <= puzzles.len() => return num - 1,
+                    _ => println!("{}Opção inválida, tente novamente.{}", colors::RED, colors::RESET)
+                }
+            },
+            Err(_) => println!("{}Erro ao ler entrada, tente novamente.{}", colors::RED, colors::RESET)
+        }
+    }
+}
+
+// Calcular intervalo de busca com base na dificuldade do puzzle
+fn get_search_range(bits: u32) -> (BigUint, BigUint) {
+    let max_range = BigUint::from(1u8) << bits;
+    let min_key = BigUint::from(0u8);
+    (min_key, max_range)
 } 

@@ -11,4 +11,5 @@ pub const WHITE: &str = "\x1b[37m";
 // Bold variants
 pub const BOLD_GREEN: &str = "\x1b[1;32m";
 pub const BOLD_YELLOW: &str = "\x1b[1;33m";
-pub const BOLD_CYAN: &str = "\x1b[1;36m"; 
+pub const BOLD_CYAN: &str = "\x1b[1;36m";
+pub const BOLD_WHITE: &str = "\x1b[1;37m"; 
