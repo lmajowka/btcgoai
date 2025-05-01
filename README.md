@@ -31,6 +31,24 @@ cargo build --release
 cargo run --release
 ```
 
+## Modos de Operação
+
+### Modo de Teste
+
+O programa oferece um modo de teste com puzzles de baixa dificuldade (5, 15 e 22 bits) que podem ser resolvidos rapidamente para verificar o funcionamento correto do algoritmo de busca.
+
+Para usar o modo de teste:
+1. Execute o programa
+2. Responda "S" quando perguntar se deseja executar em modo de teste
+3. Selecione um dos puzzles de teste disponíveis
+4. Confirme para iniciar a busca
+
+Os puzzles de teste têm chaves privadas conhecidas e são configurados para serem resolvidos em segundos ou minutos, dependendo da dificuldade escolhida e poder de processamento.
+
+### Modo Normal
+
+Este é o modo padrão que permite buscar chaves privadas em puzzles reais do [Bitcoin Puzzle TX Challenge](https://privatekeys.pw/puzzles/bitcoin-puzzle-tx).
+
 ## Desenvolvimento
 
 ### Arquivos Ignorados
@@ -53,6 +71,7 @@ Isso mantém o repositório limpo, contendo apenas código fonte e documentaçã
 - Estatísticas de busca em tempo real
 - Suporte multi-thread para máxima performance
 - Salvamento automático de resultados encontrados
+- Modo de teste com puzzles de baixa dificuldade para verificação do funcionamento
 
 ## License
 
