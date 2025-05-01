@@ -1,43 +1,44 @@
-# Bitcoin Private Key Finder
+# Bitcoin Private Key Finder (Rust)
 
-This Go program searches for Bitcoin private keys within a specified range that correspond to a targeted Bitcoin address.
+Esta é uma implementação em Rust de alta performance para busca de chaves privadas Bitcoin dentro de intervalos específicos, com suporte especial para os desafios Bitcoin Puzzle TX.
 
-## Description
+## Características
 
-The program works as follows:
-1. It prompts the user to enter a wallet number (1-160)
-2. It loads the corresponding range from `ranges.json` for that wallet number
-3. It then iterates through private keys in that range, converting each to a Bitcoin address
-4. It compares each generated address with the target wallet address from `wallets.json`
-5. If a match is found, it displays the private key
+1. **Modelo de concorrência eficiente** usando threads leves do Rust e operações atômicas
+2. **Uso eficiente de memória** com melhor gerenciamento e operações zero-copy
+3. **Sincronização eficiente de threads** usando `Arc` e `Mutex` para estado compartilhado
+4. **Operações criptográficas otimizadas** via bibliotecas Bitcoin para Rust
+5. **Otimizações de compilador** habilitadas com LTO (Link Time Optimization) e otimizações agressivas
 
-## Prerequisites
+## Requisitos
 
-- Go 1.18 or higher
+- Rust 1.50 ou superior
 
-## Usage
+## Compilação
 
-1. Make sure the `wallets.json` and `ranges.json` files are in the same directory as the executable
-2. Run the program:
-   ```
-   ./bitcoin_finder.exe
-   ```
-3. Enter a wallet number between 1 and 160 when prompted
-4. The program will start searching for matching private keys
+```bash
+# Build de desenvolvimento
+cargo build
 
-## Compilation
+# Build de produção (muito mais rápido)
+cargo build --release
+```
 
-1. Ensure you have Go 1.18 or higher installed on your system
-2. Clone this repository or download the source code
-3. Navigate to the project directory
-4. Build the executable:
-   ```
-   go build -o bitcoin_finder.exe
-   ```
-5. The compiled executable will be created in the same directory
+## Execução
 
-## Notes
+```bash
+# Executar o build de produção
+cargo run --release
+```
 
-- Large ranges may take significant time to process
-- The program includes a built-in limit to prevent infinite searches
-- Only active ranges (status=1) will be processed
+## Funcionalidades
+
+- Busca de chaves privadas para puzzles Bitcoin não resolvidos
+- Interface de usuário interativa para seleção de puzzles
+- Estatísticas de busca em tempo real
+- Suporte multi-thread para máxima performance
+- Salvamento automático de resultados encontrados
+
+## License
+
+Este software é fornecido como está, sem garantias.
