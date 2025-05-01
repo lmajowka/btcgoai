@@ -33,21 +33,31 @@ cargo run --release
 
 ## Modos de Operação
 
-### Modo de Teste
+O programa oferece três modos de operação distintos:
 
-O programa oferece um modo de teste com puzzles de baixa dificuldade (5, 15 e 22 bits) que podem ser resolvidos rapidamente para verificar o funcionamento correto do algoritmo de busca.
+### 1. Modo Normal
 
-Para usar o modo de teste:
-1. Execute o programa
-2. Responda "S" quando perguntar se deseja executar em modo de teste
-3. Selecione um dos puzzles de teste disponíveis
-4. Confirme para iniciar a busca
+Este é o modo principal para tentar encontrar chaves privadas dos puzzles reais do [Bitcoin Puzzle TX Challenge](https://privatekeys.pw/puzzles/bitcoin-puzzle-tx). Neste modo:
+1. São apresentados todos os puzzles não resolvidos (71-160)
+2. Você seleciona um puzzle específico
+3. O programa inicia a busca efetiva pela chave privada usando todos os cores disponíveis
 
-Os puzzles de teste têm chaves privadas conhecidas e são configurados para serem resolvidos em segundos ou minutos, dependendo da dificuldade escolhida e poder de processamento.
+### 2. Modo Treinamento
 
-### Modo Normal
+Utiliza puzzles de baixíssima dificuldade (5, 15 e 22 bits) que podem ser resolvidos em segundos ou minutos para verificar o funcionamento correto do algoritmo de busca. Estes puzzles têm chaves privadas conhecidas, ideais para:
+- Testar a instalação do programa
+- Verificar se o algoritmo de busca está funcionando corretamente
+- Demonstrar o processo de descoberta de chaves
 
-Este é o modo padrão que permite buscar chaves privadas em puzzles reais do [Bitcoin Puzzle TX Challenge](https://privatekeys.pw/puzzles/bitcoin-puzzle-tx).
+### 3. Modo Teste de Ranges
+
+Este modo permite explorar os intervalos de busca dos puzzles reais não resolvidos, mas sem iniciar a busca efetiva. É útil para:
+- Analisar a dificuldade de cada puzzle
+- Ver estimativas de tempo para busca completa
+- Examinar os intervalos de chaves privadas
+- Obter estatísticas sobre probabilidades de sucesso
+
+Este modo é recomendado para entender a magnitude do desafio antes de tentar a busca real no Modo Normal.
 
 ## Desenvolvimento
 
@@ -71,7 +81,8 @@ Isso mantém o repositório limpo, contendo apenas código fonte e documentaçã
 - Estatísticas de busca em tempo real
 - Suporte multi-thread para máxima performance
 - Salvamento automático de resultados encontrados
-- Modo de teste com puzzles de baixa dificuldade para verificação do funcionamento
+- Modo de treinamento com puzzles de baixa dificuldade para verificação do funcionamento
+- Modo de teste de ranges para análise da magnitude do desafio
 
 ## License
 
