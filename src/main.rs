@@ -61,11 +61,8 @@ fn main() {
     // Configurar o thread pool global com os parâmetros otimizados
     if let Err(e) = performance::configure_thread_pool(&params) {
         println!("{}Erro ao configurar threads: {}{}", colors::RED, e, colors::RESET);
-        // Fallback para configuração padrão
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get())
-            .build_global()
-            .unwrap();
+        // Não tentar inicializar novamente se já estiver inicializado
+        // Apenas continue usando o pool já configurado
     }
     
     println!("{}Usando {} threads ({} núcleos) e {}% dos recursos do sistema{}", 

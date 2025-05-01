@@ -125,7 +125,18 @@ pub fn configure_thread_pool(params: &SearchParameters) -> Result<(), String> {
         .num_threads(params.thread_count)
         .build_global() {
         Ok(_) => Ok(()),
-        Err(e) => Err(format!("Erro ao configurar thread pool: {}", e)),
+        Err(e) => {
+            // Verificar se o erro é GlobalPoolAlreadyInitialized
+            if format!("{:?}", e).contains("GlobalPoolAlreadyInitialized") {
+                // O pool já está inicializado, isso não é um erro crítico
+                // Apenas informe e retorne OK para continuar
+                println!("Nota: Pool de threads global já inicializado. Continuando com a configuração existente.");
+                Ok(())
+            } else {
+                // Outros erros são reportados normalmente
+                Err(format!("Erro ao configurar thread pool: {}", e))
+            }
+        }
     }
 }
 
