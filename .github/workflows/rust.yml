@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   build:
@@ -16,15 +17,30 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable]
+      fail-fast: false
 
     steps:
     - uses: actions/checkout@v3
+    
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@master
       with:
         toolchain: ${{ matrix.rust }}
+    
+    - name: System info (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        system_profiler SPSoftwareDataType SPHardwareDataType
+        uname -a
+    
+    - name: Check Rust version
+      run: |
+        rustc --version
+        cargo --version
+        
     - name: Build
       run: cargo build --verbose
+      
     - name: Run tests
       run: cargo test --verbose
     

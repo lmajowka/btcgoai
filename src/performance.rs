@@ -43,10 +43,19 @@ pub fn detect_system_resources() -> SystemResources {
         "Unknown".to_string()
     };
     
-    // Detecção básica de features da CPU
-    let has_avx = is_x86_feature_detected!("avx");
-    let has_avx2 = is_x86_feature_detected!("avx2");
-    let has_sse = is_x86_feature_detected!("sse");
+    // Detecção de features da CPU
+    #[cfg(target_arch = "x86_64")]
+    let (has_avx, has_avx2, has_sse) = unsafe {
+        (
+            is_x86_feature_detected!("avx"),
+            is_x86_feature_detected!("avx2"),
+            is_x86_feature_detected!("sse"),
+        )
+    };
+    
+    // Para arquiteturas não-x86 (como ARM em macOS M1/M2)
+    #[cfg(not(target_arch = "x86_64"))]
+    let (has_avx, has_avx2, has_sse) = (false, false, false);
     
     let total_memory = sys.total_memory();
     let available_memory = sys.available_memory();
