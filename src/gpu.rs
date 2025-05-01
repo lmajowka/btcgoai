@@ -405,7 +405,7 @@ impl GpuSearcher {
             
             // IMPROVED APPROACH: Set a maximum range size per sub-chunk
             // This ensures we don't try to process ranges that are too large
-            let max_subchunk_range = 1_000_000_000_000u64; // 1 trillion keys per sub-chunk
+            let max_subchunk_range = 1_000_000_000u64; // 1 billion keys per sub-chunk
             
             // Process data in smaller chunks the GPU can handle
             let mut all_found_keys = Vec::new();
@@ -414,7 +414,7 @@ impl GpuSearcher {
             // Using a logarithmic approach to avoid creating too many chunks
             let total_subchunks = if range_size > max_subchunk_range {
                 let log_range_size = (range_size as f64).log10();
-                let suggested_chunks = (10.0_f64).powf(log_range_size - 12.0).ceil() as u64;
+                let suggested_chunks = (10.0_f64).powf(log_range_size - 9.0).ceil() as u64;
                 std::cmp::max(10, suggested_chunks) // At least 10 subchunks
             } else {
                 1 // Just one subchunk for small ranges
@@ -422,7 +422,13 @@ impl GpuSearcher {
             
             let subchunk_size = range_size / total_subchunks;
             
-            println!("Iniciando busca com GPU...");
+            if total_subchunks > 1 {
+                println!("{}GPU: Dividindo range em {} sub-chunks (cada um processando ~{} chaves){}", 
+                        crate::colors::CYAN, total_subchunks, subchunk_size, crate::colors::RESET);
+            }
+            
+            // Create a progress bar to update
+            let mut last_progress_update = std::time::Instant::now();
             
             // Process each subchunk
             for subchunk_idx in 0..total_subchunks {
@@ -440,8 +446,19 @@ impl GpuSearcher {
                 
                 // Calculate if this subchunk is too large for GPU
                 if subchunk_end - subchunk_start > max_subchunk_range {
-                    println!("Aviso: Valor muito grande para GPU, pulando chunk");
+                    println!("{}Aviso: Valor muito grande para GPU, pulando chunk{}", 
+                            crate::colors::YELLOW, crate::colors::RESET);
                     continue;
+                }
+                
+                // Update progress
+                let now = std::time::Instant::now();
+                if total_subchunks > 1 && now.duration_since(last_progress_update).as_secs() >= 5 {
+                    let progress_pct = (subchunk_idx as f64 / total_subchunks as f64) * 100.0;
+                    println!("{}GPU Progresso: {:.1}% (sub-chunk {}/{}){}", 
+                            crate::colors::CYAN, progress_pct, subchunk_idx+1, total_subchunks,
+                            crate::colors::RESET);
+                    last_progress_update = now;
                 }
                 
                 // Now process this more manageable subchunk
@@ -453,7 +470,8 @@ impl GpuSearcher {
                 
                 // Skip if items_per_work is 0 or too large
                 if items_per_work == 0 || items_per_work > max_subchunk_range {
-                    println!("Aviso: Range de trabalho inválido para GPU, pulando");
+                    println!("{}Aviso: Range de trabalho inválido para GPU, pulando{}", 
+                            crate::colors::YELLOW, crate::colors::RESET);
                     continue;
                 }
                 
@@ -549,14 +567,14 @@ impl GpuSearcher {
                 let kernel_name = CString::new("search_keys").unwrap();
                 
                 // Create the kernel and set arguments
-                let kernel = unsafe {
-                    // Get the raw program pointer using transmute (this is unsafe but necessary)
-                    let program_ptr = program as *const Program as *mut std::ffi::c_void;
-                    
-                    // Create kernel using opencl3 API with the raw pointer
-                    let kernel_ptr = opencl3::kernel::create_kernel(
-                        program_ptr, kernel_name.as_c_str())
-                        .map_err(|e| format!("Failed to create kernel: {}", e))?;
+                let kernel = {
+                    // Create kernel using opencl3 API - access program directly
+                    let kernel_ptr = unsafe {
+                        let program_ptr = program as *const Program as *mut std::ffi::c_void;
+                        opencl3::kernel::create_kernel(
+                            program_ptr, kernel_name.as_c_str())
+                            .map_err(|e| format!("Failed to create kernel: {}", e))?
+                    };
                     
                     Kernel::new(kernel_ptr)
                         .map_err(|e| format!("Failed to create kernel object: {}", e))?
@@ -604,11 +622,15 @@ impl GpuSearcher {
                 let num_found = results[0] as usize;
                 if num_found > 0 {
                     all_found_keys.extend_from_slice(&found_keys[0..num_found.min(max_results)]);
+                    println!("{}GPU ENCONTROU {} CHAVES NO RANGE!{}", 
+                            crate::colors::BOLD_GREEN, num_found, crate::colors::RESET);
                 }
-                
-                // Print progress information for this subchunk
-                println!("Processado subchunk GPU {}/{}: [{} - {}]", 
-                         subchunk_idx+1, total_subchunks, subchunk_start, subchunk_end);
+            }
+            
+            // Final status update
+            if total_subchunks > 1 {
+                println!("{}GPU: Busca completa em {} sub-chunks{}", 
+                        crate::colors::CYAN, total_subchunks, crate::colors::RESET);
             }
             
             Ok(all_found_keys)
@@ -631,7 +653,22 @@ impl GpuSearcher {
         let mut targets = HashSet::new();
         targets.insert(*target);
         
+        // Validate range size
+        if range_end <= range_start {
+            println!("Aviso: Range inválido para GPU ({} - {}), pulando.", range_start, range_end);
+            return Ok(vec![]);
+        }
+        
+        let range_size = range_end - range_start;
+        if range_size > 10_000_000_000u64 {
+            println!("Aviso: Range muito grande para GPU ({} chaves), dividindo em sub-chunks.", range_size);
+        }
+        
         // Call the main search function
+        println!("{}GPU iniciando busca no range: {} - {}{}", 
+                 crate::colors::MAGENTA, range_start, range_end, crate::colors::RESET); 
+        
+        // Call the main search function with better progress indication
         self.search(&targets, range_start, range_end, batch_size)
     }
 } 

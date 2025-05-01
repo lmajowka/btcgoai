@@ -106,24 +106,24 @@ pub fn search_for_private_key(min_key: &BigUint, max_key: &BigUint, target_hash1
                             progress_percentage,
                             colors::RESET);
                             
-                    // Estimativa de tempo restante
-                    let keys_remaining = range_size_f64_clone - current_keys_checked as f64;
-                    let time_remaining = keys_remaining / keys_per_second;
-                    
-                    let time_remaining_str = if time_remaining > 86400.0 {
-                        format!("{:.2} dias", time_remaining / 86400.0)
-                    } else if time_remaining > 3600.0 {
-                        format!("{:.2} horas", time_remaining / 3600.0)
-                    } else if time_remaining > 60.0 {
-                        format!("{:.2} minutos", time_remaining / 60.0)
-                    } else {
-                        format!("{:.2} segundos", time_remaining)
-                    };
-                    
-                    println!("{}Tempo restante estimado: {}{}", 
-                            colors::GREEN,
-                            time_remaining_str,
-                            colors::RESET);
+                            // Estimativa de tempo restante
+                            let keys_remaining = range_size_f64_clone - current_keys_checked as f64;
+                            let time_remaining = keys_remaining / keys_per_second;
+                            
+                            let time_remaining_str = if time_remaining > 86400.0 {
+                                format!("{:.2} dias", time_remaining / 86400.0)
+                            } else if time_remaining > 3600.0 {
+                                format!("{:.2} horas", time_remaining / 3600.0)
+                            } else if time_remaining > 60.0 {
+                                format!("{:.2} minutos", time_remaining / 60.0)
+                            } else {
+                                format!("{:.2} segundos", time_remaining)
+                            };
+                            
+                            println!("{}Tempo restante estimado: {}{}", 
+                                    colors::GREEN,
+                                    time_remaining_str,
+                                    colors::RESET);
                 }
                 
                 last_update = Instant::now();
@@ -261,7 +261,7 @@ pub fn search_for_private_key(min_key: &BigUint, max_key: &BigUint, target_hash1
 #[allow(clippy::too_many_arguments)]
 pub fn search_for_private_key_optimized(
     search_ranges: &Vec<(BigUint, BigUint)>,
-    target_hash160: &[u8],
+    target_hash160: &[u8], 
     batch_size: usize,
     mut gpu_searcher: OptionalGpuSearcher,
 ) -> Option<String> {
@@ -302,6 +302,13 @@ pub fn search_for_private_key_optimized(
     // Count of completed chunks
     let completed_chunks = std::sync::atomic::AtomicUsize::new(0);
     
+    // Track GPU vs CPU usage
+    let gpu_processed_chunks = std::sync::atomic::AtomicUsize::new(0);
+    let cpu_processed_chunks = std::sync::atomic::AtomicUsize::new(0);
+    
+    println!("{}Iniciando busca com {} chunks...{}", 
+             crate::colors::BOLD_GREEN, total_ranges, crate::colors::RESET);
+    
     // Start CPU search for all ranges
     for (i, (min, max)) in search_ranges.iter().enumerate() {
         // Skip if we already found the key
@@ -316,11 +323,20 @@ pub fn search_for_private_key_optimized(
             if gpu_available && !gpu_failed.load(std::sync::atomic::Ordering::SeqCst) {
                 // Only process with GPU if range fits in u64
                 if let (Some(min_u64), Some(max_u64)) = (min.to_u64(), max.to_u64()) {
+                    // Get the range size to check if it's suitable for GPU
+                    let range_size = max_u64.saturating_sub(min_u64);
+                    
+                    // Set a limit for ranges that GPU can handle
+                    let max_gpu_range = 10_000_000_000u64; // 10 billion
+                    
                     // Only process with GPU if range isn't too large
-                    if max_u64 - min_u64 <= 1_000_000_000_000u64 {
+                    if range_size <= max_gpu_range {
                         // Process with GPU if possible
                         if let Some(ref mut searcher) = gpu_searcher {
-                            println!("GPU procurando chunk {}/{}", i+1, total_ranges);
+                            println!("{}GPU procurando chunk {}/{} [Range: {} - {}]{}",
+                                    crate::colors::MAGENTA, i+1, total_ranges, 
+                                    min_u64, max_u64,
+                                    crate::colors::RESET);
                             
                             // Try to search using GPU
                             match searcher.search_direct(&target_hash_arr, min_u64, max_u64, batch_size) {
@@ -329,21 +345,34 @@ pub fn search_for_private_key_optimized(
                                     if !found_keys.is_empty() {
                                         // Send the first found key back
                                         let key_hex = format!("{:x}", found_keys[0]);
-                                        found_key = Some(key_hex);
+                                        found_key = Some(key_hex.clone());
+                                        println!("{}GPU ENCONTROU UMA CHAVE! {}{}", 
+                                                crate::colors::BOLD_GREEN, key_hex, 
+                                                crate::colors::RESET);
                                         // Skip CPU search
                                         true
                                     } else {
                                         // Update the keys checked counter
                                         let range_size = max_u64 - min_u64;
                                         KEYS_CHECKED.fetch_add(range_size as usize / 10, std::sync::atomic::Ordering::Relaxed);
+                                        
+                                        // Increment completed and GPU chunk counters
                                         completed_chunks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                        gpu_processed_chunks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                        
+                                        println!("{}GPU completou chunk {}/{} (sem resultados){}",
+                                                crate::colors::CYAN, i+1, total_ranges, 
+                                                crate::colors::RESET);
+                                        
                                         // Skip CPU search
                                         true
                                     }
                                 },
                                 Err(e) => {
                                     // Log the error
-                                    println!("Erro GPU (chunk {}/{}): {}", i+1, total_ranges, e);
+                                    println!("{}Erro GPU (chunk {}/{}): {}{}", 
+                                            crate::colors::RED, i+1, total_ranges, e,
+                                            crate::colors::RESET);
                                     
                                     // Increment failure counter (static to persist across chunks)
                                     static GPU_FAILURES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -366,14 +395,26 @@ pub fn search_for_private_key_optimized(
                         }
                     } else {
                         // Range too large for GPU
+                        println!("{}Chunk {}/{}: Range muito grande para GPU [{} - {}], usando CPU{}", 
+                                crate::colors::YELLOW, i+1, total_ranges, min_u64, max_u64,
+                                crate::colors::RESET);
                         false
                     }
                 } else {
                     // Range doesn't fit in u64, process with CPU
+                    println!("{}Chunk {}/{}: Range não cabe em u64, usando CPU{}", 
+                            crate::colors::YELLOW, i+1, total_ranges,
+                            crate::colors::RESET);
                     false
                 }
             } else {
                 // GPU not available or has failed
+                if !gpu_available {
+                    if i == 0 {  // Print only once
+                        println!("{}GPU não disponível, usando apenas CPU{}", 
+                                crate::colors::YELLOW, crate::colors::RESET);
+                    }
+                }
                 false
             }
         };
@@ -390,14 +431,22 @@ pub fn search_for_private_key_optimized(
             let target_clone = target_hash_arr;
             let i_clone = i;
             
+            // Increment CPU chunks counter
+            cpu_processed_chunks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            
             // Spawn a CPU worker thread
             std::thread::spawn(move || {
-                println!("CPU procurando chunk {}/{}", i_clone+1, total_ranges);
+                println!("{}CPU procurando chunk {}/{}{}", 
+                         crate::colors::GREEN, i_clone+1, total_ranges, 
+                         crate::colors::RESET);
                 
                 if let Some(key) = search_range_for_private_key(&min_clone, &max_clone, &target_clone, batch_size) {
                     let _ = tx_clone.send(Some((i_clone, key)));
                 } else {
                     let _ = tx_clone.send(None);
+                    println!("{}CPU completou chunk {}/{} (sem resultados){}", 
+                             crate::colors::CYAN, i_clone+1, total_ranges,
+                             crate::colors::RESET);
                 }
             });
         }
@@ -440,9 +489,9 @@ pub fn search_for_private_key_optimized(
             }
         }
         
-        // Update status display every 30 seconds
+        // Update status display every 15 seconds (more frequent updates)
         let now = std::time::Instant::now();
-        if now.duration_since(last_status_time).as_secs() >= 30 {
+        if now.duration_since(last_status_time).as_secs() >= 15 {
             last_status_time = now;
             
             // Calculate speed
@@ -456,18 +505,45 @@ pub fn search_for_private_key_optimized(
                 let minutes = (elapsed % 3600) / 60;
                 let seconds = elapsed % 60;
                 
-                println!("[{:02}:{:02}:{:02}] Verificadas: {} chaves ({:.2} M/s)",
-                         hours, minutes, seconds, keys_checked, speed);
-                
-                // Calculate the global average speed over the entire session
-                let total_speed = keys_checked as f64 / elapsed as f64 / 1_000_000.0;
-                println!("Velocidade média global: {:.2} M/s", total_speed);
-                
                 // Display completion percentage
                 let completed = completed_chunks.load(std::sync::atomic::Ordering::SeqCst);
                 let percentage = (completed as f64 / total_ranges as f64) * 100.0;
-                println!("Progresso: {}/{} chunks ({:.1}%)", 
-                         completed, total_ranges, percentage);
+                
+                // Get GPU vs CPU stats
+                let gpu_chunks = gpu_processed_chunks.load(std::sync::atomic::Ordering::SeqCst);
+                let cpu_chunks = cpu_processed_chunks.load(std::sync::atomic::Ordering::SeqCst);
+                
+                println!("\n{}==== PROGRESSO DA BUSCA ===={}", crate::colors::BOLD_YELLOW, crate::colors::RESET);
+                println!("{}Tempo decorrido: {:02}:{:02}:{:02}{}", 
+                         crate::colors::CYAN, hours, minutes, seconds, crate::colors::RESET);
+                         
+                println!("{}Chaves verificadas: {} ({:.2} M/s){}", 
+                         crate::colors::CYAN, keys_checked, speed, crate::colors::RESET);
+                         
+                println!("{}Progresso: {}/{} chunks ({:.1}%){}", 
+                         crate::colors::GREEN, completed, total_ranges, percentage, crate::colors::RESET);
+                         
+                println!("{}Distribuição: {} chunks na GPU, {} chunks na CPU{}", 
+                         crate::colors::MAGENTA, gpu_chunks, cpu_chunks, crate::colors::RESET);
+                
+                // Estimativa de tempo restante
+                if speed > 0.0 {
+                    let percentage_remaining = 100.0 - percentage;
+                    let estimated_total_seconds = (elapsed as f64 / percentage) * 100.0;
+                    let remaining_seconds = estimated_total_seconds - elapsed as f64;
+                    
+                    let remaining_hours = (remaining_seconds / 3600.0) as u64;
+                    let remaining_minutes = ((remaining_seconds % 3600.0) / 60.0) as u64;
+                    
+                    println!("{}Tempo restante estimado: {:02}:{:02}:{:02} ({:.1}% restante){}", 
+                            crate::colors::YELLOW, 
+                            remaining_hours, remaining_minutes, (remaining_seconds % 60.0) as u64,
+                            percentage_remaining,
+                            crate::colors::RESET);
+                }
+                
+                println!("{}============================{}\n", 
+                        crate::colors::BOLD_YELLOW, crate::colors::RESET);
             }
         }
     }
