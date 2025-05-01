@@ -3,6 +3,14 @@ use sysinfo::{System, SystemExt, CpuExt};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 use rayon::ThreadPoolBuilder;
+use std::default::Default;
+use num_cpus;
+
+// Detecção de instruções SIMD
+#[cfg(target_arch = "x86")]
+use std::arch::x86::*;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 
 // Estrutura para armazenar informações sobre recursos do sistema
 pub struct SystemResources {
@@ -20,7 +28,7 @@ pub struct SystemResources {
 
 // Parâmetros otimizados para busca
 pub struct SearchParameters {
-    pub thread_count: usize,      // Número de threads a usar
+    pub threads: usize,          // Número de threads a usar
     pub batch_size: usize,        // Tamanho do batch para processamento
     pub resource_usage: u8,       // Percentual de recursos a utilizar (1-100)
     
@@ -29,6 +37,18 @@ pub struct SearchParameters {
     pub memory_limit: usize,      // Limite de memória em bytes
     #[allow(dead_code)]
     pub use_simd: bool,           // Se deve usar instruções SIMD
+}
+
+impl Default for SearchParameters {
+    fn default() -> Self {
+        SearchParameters {
+            threads: num_cpus::get(),
+            batch_size: 4096,
+            resource_usage: 75,
+            memory_limit: 1024 * 1024 * 1024, // 1GB default
+            use_simd: true,
+        }
+    }
 }
 
 // Detecta recursos do sistema
@@ -43,19 +63,12 @@ pub fn detect_system_resources() -> SystemResources {
         "Unknown".to_string()
     };
     
-    // Detecção de features da CPU
-    #[cfg(target_arch = "x86_64")]
-    let (has_avx, has_avx2, has_sse) = unsafe {
-        (
-            is_x86_feature_detected!("avx"),
-            is_x86_feature_detected!("avx2"),
-            is_x86_feature_detected!("sse"),
-        )
+    // Get CPU info and determine which SIMD instructions are available
+    let (has_avx, has_avx2, has_sse) = {
+        (is_x86_feature_detected!("avx"),
+         is_x86_feature_detected!("avx2"),
+         is_x86_feature_detected!("sse4.1"))
     };
-    
-    // Para arquiteturas não-x86 (como ARM em macOS M1/M2)
-    #[cfg(not(target_arch = "x86_64"))]
-    let (has_avx, has_avx2, has_sse) = (false, false, false);
     
     let total_memory = sys.total_memory();
     let available_memory = sys.available_memory();
@@ -120,7 +133,7 @@ pub fn calculate_optimal_parameters(resources: &SystemResources, usage_percentag
     let use_simd = resources.has_avx2 || resources.has_avx || resources.has_sse;
     
     SearchParameters {
-        thread_count,
+        threads: thread_count,
         batch_size,
         memory_limit,
         use_simd,
@@ -131,7 +144,7 @@ pub fn calculate_optimal_parameters(resources: &SystemResources, usage_percentag
 // Configura o thread pool global com os parâmetros otimizados
 pub fn configure_thread_pool(params: &SearchParameters) -> Result<(), String> {
     match ThreadPoolBuilder::new()
-        .num_threads(params.thread_count)
+        .num_threads(params.threads)
         .build_global() {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -173,7 +186,7 @@ pub fn estimate_search_speed(resources: &SystemResources, params: &SearchParamet
     
     // Velocidade estimada por segundo (ajustada pelo uso de recursos)
     (base_keys_per_thread as f64 
-        * params.thread_count as f64 
+        * params.threads as f64 
         * cpu_multiplier 
         * memory_multiplier 
         * (params.resource_usage as f64 / 100.0)) as u64
@@ -193,7 +206,7 @@ pub fn optimize_workload_distribution(
     params: &SearchParameters
 ) -> Vec<(BigUint, BigUint)> {
     let range_size = max_key - min_key;
-    let chunk_count = params.thread_count * 4; // Usar 4x mais chunks que threads para balanceamento
+    let chunk_count = params.threads * 4; // Usar 4x mais chunks que threads para balanceamento
     
     let mut chunks = Vec::with_capacity(chunk_count);
     let chunk_size = &range_size / chunk_count;
@@ -217,20 +230,29 @@ pub fn optimize_workload_distribution(
     chunks
 }
 
-// Contador global de chaves verificadas
-static KEYS_CHECKED: AtomicUsize = AtomicUsize::new(0);
-
-// Incrementa o contador de chaves verificadas
-pub fn increment_keys_checked(count: usize) {
-    KEYS_CHECKED.fetch_add(count, Ordering::Relaxed);
-}
-
-// Obtém o total de chaves verificadas
-pub fn get_keys_checked() -> usize {
-    KEYS_CHECKED.load(Ordering::Relaxed)
-}
-
-// Reinicia o contador de chaves verificadas
+// Reset the keys checked counter (used between searches)
 pub fn reset_keys_checked() {
-    KEYS_CHECKED.store(0, Ordering::Relaxed);
+    // Access the static counter in search.rs and reset it
+    unsafe {
+        let ptr = &crate::search::KEYS_CHECKED as *const std::sync::atomic::AtomicUsize;
+        (*ptr).store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+// Get the current number of keys checked
+pub fn get_keys_checked() -> usize {
+    // Access the static counter in search.rs
+    unsafe {
+        let ptr = &crate::search::KEYS_CHECKED as *const std::sync::atomic::AtomicUsize;
+        (*ptr).load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+// Increment the keys checked counter by the specified amount
+pub fn increment_keys_checked(count: usize) {
+    // Access the static counter in search.rs
+    unsafe {
+        let ptr = &crate::search::KEYS_CHECKED as *const std::sync::atomic::AtomicUsize;
+        (*ptr).fetch_add(count, Ordering::Relaxed);
+    }
 } 

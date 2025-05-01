@@ -102,4 +102,16 @@ pub fn display_test_puzzle_info(puzzle: &TestPuzzle) {
     }
     
     println!("======================================");
+}
+
+/// Find training puzzles within a specific bit range
+pub fn find_training_puzzles(min_bits: u8, max_bits: u8) -> Vec<TestPuzzle> {
+    let mut test_puzzles = get_test_puzzles();
+    // Convert addresses to hash160 for all puzzles
+    let _ = convert_addresses_to_hash160(&mut test_puzzles);
+    
+    // Filter by bit range
+    test_puzzles.into_iter()
+        .filter(|puzzle| puzzle.bits >= min_bits as u32 && puzzle.bits <= max_bits as u32)
+        .collect()
 } 

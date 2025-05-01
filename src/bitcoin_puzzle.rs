@@ -163,4 +163,11 @@ pub fn display_puzzle_info(puzzle: &BitcoinPuzzle) {
     }
     
     println!("==================================");
+}
+
+/// Load Bitcoin puzzles from data files
+pub fn load_puzzles() -> Vec<BitcoinPuzzle> {
+    let mut puzzles = get_unsolved_puzzles();
+    let _ = convert_addresses_to_hash160(&mut puzzles);
+    puzzles
 } 
