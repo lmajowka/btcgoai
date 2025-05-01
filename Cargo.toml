@@ -19,6 +19,7 @@ num-traits = "0.2.17"
 num_cpus = "1.16.0"
 mimalloc = { version = "0.1.39", default-features = false }
 bs58 = "0.4.0"
+sysinfo = "0.29.10"
 
 [profile.release]
 lto = "fat"

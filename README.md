@@ -9,6 +9,7 @@ Esta é uma implementação em Rust de alta performance para busca de chaves pri
 3. **Sincronização eficiente de threads** usando `Arc` e `Mutex` para estado compartilhado
 4. **Operações criptográficas otimizadas** via bibliotecas Bitcoin para Rust
 5. **Otimizações de compilador** habilitadas com LTO (Link Time Optimization) e otimizações agressivas
+6. **Detecção automática de recursos** com ajuste dinâmico de performance
 
 ## Requisitos
 
@@ -30,6 +31,29 @@ cargo build --release
 # Executar o build de produção
 cargo run --release
 ```
+
+## Detecção de Recursos e Otimização
+
+O programa analisa automaticamente os recursos do sistema para otimizar a performance:
+
+1. **Detecção de hardware**:
+   - Número de cores físicos e threads lógicos da CPU
+   - Memória total e disponível
+   - Conjunto de instruções SIMD disponíveis (AVX2, AVX, SSE)
+   - Marca e modelo da CPU
+
+2. **Ajuste dinâmico**:
+   - Controle de uso de recursos (percentual configurável)
+   - Tamanho de batch otimizado com base na memória disponível
+   - Distribuição eficiente de trabalho entre threads
+   - Estimativas de performance personalizadas para o hardware específico
+
+3. **Monitoramento em tempo real**:
+   - Contagem global de chaves verificadas
+   - Velocidade instantânea e média
+   - Estatísticas de progresso
+
+O usuário pode escolher a porcentagem de recursos do sistema que deseja utilizar (10-100%), permitindo executar outras tarefas enquanto a busca ocorre em segundo plano.
 
 ## Modos de Operação
 
@@ -83,6 +107,7 @@ Isso mantém o repositório limpo, contendo apenas código fonte e documentaçã
 - Salvamento automático de resultados encontrados
 - Modo de treinamento com puzzles de baixa dificuldade para verificação do funcionamento
 - Modo de teste de ranges para análise da magnitude do desafio
+- Ajuste automático de parâmetros com base no hardware disponível
 
 ## License
 
