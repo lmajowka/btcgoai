@@ -8,6 +8,7 @@ mod colors;
 mod data;
 mod bitcoin_puzzle;
 mod bitcoin_puzzle_test;
+mod performance;
 
 use std::io::{self, BufRead, Write};
 use num_bigint::BigUint;
@@ -15,16 +16,68 @@ use num_traits::ToPrimitive;
 use hex;
 
 fn main() {
-    // Configurar thread pool para o máximo de performance
-    let num_threads = num_cpus::get() * 2;
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build_global()
-        .unwrap();
-        
     println!("{}Bitcoin Private Key Finder (Rust) - Puzzle TX Edition{}", colors::BOLD_GREEN, colors::RESET);
-    println!("{}Initializing with {} threads{}\n", colors::CYAN, num_threads, colors::RESET);
-
+    
+    // Detectar recursos do sistema
+    let resources = performance::detect_system_resources();
+    
+    // Exibir informações do sistema
+    println!("{}Informações do sistema:{}", colors::BOLD_YELLOW, colors::RESET);
+    println!("{}CPU: {}{}", colors::CYAN, resources.cpu_brand, colors::RESET);
+    println!("{}Núcleos físicos: {}, Threads lógicos: {}{}", 
+             colors::CYAN, resources.cpu_count, resources.thread_count, colors::RESET);
+    println!("{}Memória total: {:.2} GB, Disponível: {:.2} GB{}", 
+             colors::CYAN, 
+             resources.total_memory as f64 / (1024.0 * 1024.0 * 1024.0),
+             resources.available_memory as f64 / (1024.0 * 1024.0 * 1024.0),
+             colors::RESET);
+    
+    // Instruções SIMD disponíveis
+    let simd_info = format!("{}{}{}{}",
+                           if resources.has_avx2 { "AVX2 " } else { "" },
+                           if resources.has_avx { "AVX " } else { "" },
+                           if resources.has_sse { "SSE " } else { "" },
+                           if !resources.has_avx2 && !resources.has_avx && !resources.has_sse { "Nenhuma" } else { "" });
+    println!("{}Instruções SIMD disponíveis: {}{}", colors::CYAN, simd_info, colors::RESET);
+    
+    // Perguntar quanto dos recursos o usuário deseja utilizar
+    print!("\n{}Percentual de recursos do sistema a utilizar (10-100%): {}", colors::BOLD_CYAN, colors::RESET);
+    io::stdout().flush().unwrap();
+    
+    let stdin = io::stdin();
+    let resource_usage_str = stdin.lock().lines().next().unwrap().unwrap();
+    let resource_usage: u8 = match resource_usage_str.trim().parse() {
+        Ok(num) if num >= 10 && num <= 100 => num,
+        _ => {
+            println!("{}Valor inválido. Usando 75% dos recursos.{}", 
+                     colors::YELLOW, colors::RESET);
+            75
+        }
+    };
+    
+    // Calcular parâmetros otimizados para a busca
+    let params = performance::calculate_optimal_parameters(&resources, resource_usage);
+    
+    // Configurar o thread pool global com os parâmetros otimizados
+    if let Err(e) = performance::configure_thread_pool(&params) {
+        println!("{}Erro ao configurar threads: {}{}", colors::RED, e, colors::RESET);
+        // Fallback para configuração padrão
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_cpus::get())
+            .build_global()
+            .unwrap();
+    }
+    
+    println!("{}Usando {} threads ({} núcleos) e {}% dos recursos do sistema{}", 
+             colors::GREEN, params.thread_count, resources.cpu_count, resource_usage, colors::RESET);
+    println!("{}Tamanho de batch otimizado: {} chaves{}", 
+             colors::GREEN, params.batch_size, colors::RESET);
+    
+    // Velocidade estimada baseada nas capacidades do hardware
+    let est_keys_per_sec = performance::estimate_search_speed(&resources, &params);
+    println!("{}Velocidade estimada: {:.2} M chaves/s{}\n", 
+             colors::GREEN, est_keys_per_sec as f64 / 1_000_000.0, colors::RESET);
+    
     // Menu principal com 3 opções claras
     println!("{}Modos disponíveis:{}", colors::BOLD_YELLOW, colors::RESET);
     println!("{}1. Modo Normal - Tenta resolver puzzles reais do Bitcoin Puzzle TX{}", colors::CYAN, colors::RESET);
@@ -34,7 +87,6 @@ fn main() {
     print!("\n{}Digite o número do modo desejado (1-3): {}", colors::BOLD_CYAN, colors::RESET);
     io::stdout().flush().unwrap();
     
-    let stdin = io::stdin();
     let mode_choice_str = stdin.lock().lines().next().unwrap().unwrap();
     let mode_choice: usize = match mode_choice_str.trim().parse() {
         Ok(num) if num >= 1 && num <= 3 => num,
@@ -46,14 +98,14 @@ fn main() {
     };
     
     match mode_choice {
-        1 => run_normal_mode(num_threads),
-        2 => run_training_mode(num_threads),
-        3 => run_range_test_mode(num_threads),
-        _ => run_normal_mode(num_threads), // Fallback para modo normal
+        1 => run_normal_mode(&params, est_keys_per_sec),
+        2 => run_training_mode(&params, est_keys_per_sec),
+        3 => run_range_test_mode(&params, est_keys_per_sec),
+        _ => run_normal_mode(&params, est_keys_per_sec), // Fallback para modo normal
     }
 }
 
-fn run_training_mode(num_threads: usize) {
+fn run_training_mode(params: &performance::SearchParameters, est_keys_per_sec: u64) {
     println!("{}Modo de TREINAMENTO ativado - Usando puzzles pequenos para verificação{}", colors::BOLD_GREEN, colors::RESET);
     
     // Carregar os puzzles de teste
@@ -115,14 +167,11 @@ fn run_training_mode(num_threads: usize) {
     let bits = selected_puzzle.bits;
     let keyspace_size = BigUint::from(2u32).pow(bits);
     
-    // Velocidade estimada em chaves por segundo (baseado em testes anteriores)
-    let est_keys_per_sec = 1_000_000 * num_threads as u64; // Estimativa de 1M de chaves por thread por segundo
-    
-    // Calcular tempo estimado
+    // Calcular tempo estimado usando a estimativa de performance
     let est_seconds = keyspace_size.to_f64().unwrap() / est_keys_per_sec as f64;
     
-    println!("\n{}Estimativa de tempo para busca completa (velocidade estimada: {} M chaves/s):{}", 
-             colors::YELLOW, est_keys_per_sec / 1_000_000, colors::RESET);
+    println!("\n{}Estimativa de tempo para busca completa (velocidade estimada: {:.2} M chaves/s):{}", 
+             colors::YELLOW, est_keys_per_sec as f64 / 1_000_000.0, colors::RESET);
     
     if est_seconds > 3600.0 {
         let est_hours = est_seconds / 3600.0;
@@ -156,10 +205,19 @@ fn run_training_mode(num_threads: usize) {
     let min_key = BigUint::parse_bytes(&selected_range.min[2..].as_bytes(), 16).unwrap(); // Remover prefixo 0x
     let max_key = BigUint::parse_bytes(&selected_range.max[2..].as_bytes(), 16).unwrap(); // Remover prefixo 0x
 
-    search::search_for_private_key(&min_key, &max_key, &selected_puzzle.hash160);
+    // Reiniciar contador de chaves verificadas
+    performance::reset_keys_checked();
+
+    // Otimizar distribuição de trabalho
+    let chunks = performance::optimize_workload_distribution(&min_key, &max_key, params);
+    println!("{}Intervalo dividido em {} chunks para processamento paralelo{}", 
+             colors::GREEN, chunks.len(), colors::RESET);
+
+    // Realizar a busca com parâmetros otimizados
+    search::search_for_private_key_optimized(&chunks, &selected_puzzle.hash160, params.batch_size);
 }
 
-fn run_range_test_mode(num_threads: usize) {
+fn run_range_test_mode(params: &performance::SearchParameters, est_keys_per_sec: u64) {
     println!("{}Modo de TESTE DE RANGES ativado - Verificando intervalos dos puzzles não resolvidos{}", colors::BOLD_GREEN, colors::RESET);
     
     // Carregar os puzzles Bitcoin não resolvidos
@@ -231,16 +289,13 @@ fn run_range_test_mode(num_threads: usize) {
     let bits = selected_puzzle.bits;
     let keyspace_size = BigUint::from(2u32).pow(bits);
     
-    // Velocidade estimada em chaves por segundo (baseado em testes anteriores)
-    let est_keys_per_sec = 1_000_000 * num_threads as u64; // Estimativa de 1M de chaves por thread por segundo
-    
-    // Calcular tempo estimado
+    // Calcular tempo estimado usando a estimativa de performance específica para o hardware
     let est_seconds = keyspace_size.to_f64().unwrap() / est_keys_per_sec as f64;
     let est_days = est_seconds / (24.0 * 60.0 * 60.0);
     let est_years = est_days / 365.25;
     
-    println!("\n{}Estimativa de tempo para busca completa (velocidade estimada: {} M chaves/s):{}", 
-             colors::YELLOW, est_keys_per_sec / 1_000_000, colors::RESET);
+    println!("\n{}Estimativa de tempo para busca completa (velocidade estimada: {:.2} M chaves/s):{}", 
+             colors::YELLOW, est_keys_per_sec as f64 / 1_000_000.0, colors::RESET);
     
     if est_years > 1.0 {
         println!("{}Aproximadamente {:.2} anos{}", colors::RED, est_years, colors::RESET);
@@ -273,13 +328,18 @@ fn run_range_test_mode(num_threads: usize) {
     println!("{}Fim (max): {}{}", colors::CYAN, selected_range.max, colors::RESET);
     println!("{}Tamanho do intervalo: {}{}", colors::CYAN, range_size.to_string(), colors::RESET);
     
+    // Visualização da distribuição de trabalho
+    let chunks = performance::optimize_workload_distribution(&min_key, &max_key, params);
+    println!("\n{}Estratégia de distribuição de trabalho otimizada:{}", colors::BOLD_YELLOW, colors::RESET);
+    println!("{}Número de chunks para processamento paralelo: {}{}", colors::CYAN, chunks.len(), colors::RESET);
+    
     println!("\n{}OBSERVAÇÃO: Este modo apenas verifica o intervalo sem iniciar a busca real.{}", 
              colors::BOLD_YELLOW, colors::RESET);
     println!("{}Para iniciar uma busca real neste puzzle, use o Modo Normal (opção 1).{}", 
              colors::YELLOW, colors::RESET);
 }
 
-fn run_normal_mode(num_threads: usize) {
+fn run_normal_mode(params: &performance::SearchParameters, est_keys_per_sec: u64) {
     // Carregar os puzzles Bitcoin não resolvidos
     let mut puzzles = bitcoin_puzzle::get_unsolved_puzzles();
     match bitcoin_puzzle::convert_addresses_to_hash160(&mut puzzles) {
@@ -345,20 +405,17 @@ fn run_normal_mode(num_threads: usize) {
              colors::YELLOW, colors::BOLD_CYAN, selected_range.min, colors::RESET, 
              colors::BOLD_CYAN, selected_range.max, colors::RESET);
     
-    // Calcular estimativa de tempo com base na dificuldade
+    // Calcular estimativa de tempo com base na dificuldade e hardware
     let bits = selected_puzzle.bits;
     let keyspace_size = BigUint::from(2u32).pow(bits);
     
-    // Velocidade estimada em chaves por segundo (baseado em testes anteriores)
-    let est_keys_per_sec = 1_000_000 * num_threads as u64; // Estimativa de 1M de chaves por thread por segundo
-    
-    // Calcular tempo estimado
+    // Calcular tempo estimado usando a estimativa específica de hardware
     let est_seconds = keyspace_size.to_f64().unwrap() / est_keys_per_sec as f64;
     let est_days = est_seconds / (24.0 * 60.0 * 60.0);
     let est_years = est_days / 365.25;
     
-    println!("\n{}Estimativa de tempo para busca completa (velocidade estimada: {} M chaves/s):{}", 
-             colors::YELLOW, est_keys_per_sec / 1_000_000, colors::RESET);
+    println!("\n{}Estimativa de tempo para busca completa (velocidade estimada: {:.2} M chaves/s):{}", 
+             colors::YELLOW, est_keys_per_sec as f64 / 1_000_000.0, colors::RESET);
     
     if est_years > 1.0 {
         println!("{}Aproximadamente {:.2} anos{}", colors::RED, est_years, colors::RESET);
@@ -387,9 +444,18 @@ fn run_normal_mode(num_threads: usize) {
         return;
     }
 
+    // Reiniciar contador de chaves verificadas
+    performance::reset_keys_checked();
+    
     // Converter strings hex para BigUint
     let min_key = BigUint::parse_bytes(&selected_range.min[2..].as_bytes(), 16).unwrap(); // Remover prefixo 0x
     let max_key = BigUint::parse_bytes(&selected_range.max[2..].as_bytes(), 16).unwrap(); // Remover prefixo 0x
 
-    search::search_for_private_key(&min_key, &max_key, &selected_puzzle.hash160);
+    // Otimizar distribuição de trabalho
+    let chunks = performance::optimize_workload_distribution(&min_key, &max_key, params);
+    println!("{}Intervalo dividido em {} chunks para processamento paralelo{}", 
+             colors::GREEN, chunks.len(), colors::RESET);
+
+    // Realizar a busca com parâmetros otimizados
+    search::search_for_private_key_optimized(&chunks, &selected_puzzle.hash160, params.batch_size);
 } 
