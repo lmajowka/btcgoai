@@ -14,6 +14,14 @@ Esta é uma implementação em Rust de alta performance para busca de chaves pri
 ## Requisitos
 
 - Rust 1.50 ou superior
+- Dependências incluídas no Cargo.toml:
+  - bitcoin, bitcoin_hashes, secp256k1 (operações criptográficas)
+  - rayon (paralelismo)
+  - mimalloc (alocador de memória otimizado)
+  - bs58, hex (codificação/decodificação)
+  - serde, serde_json (serialização)
+  - num-bigint, num-traits (aritmética com números grandes)
+  - sysinfo (informações do sistema)
 
 ## Compilação
 
@@ -30,6 +38,9 @@ cargo build --release
 ```bash
 # Executar o build de produção
 cargo run --release
+
+# Passando argumentos específicos
+cargo run --release -- --mode training
 ```
 
 ## Detecção de Recursos e Otimização
@@ -57,7 +68,7 @@ O usuário pode escolher a porcentagem de recursos do sistema que deseja utiliza
 
 ## Modos de Operação
 
-O programa oferece três modos de operação distintos:
+O programa oferece quatro modos de operação distintos:
 
 ### 1. Modo Normal
 
@@ -113,6 +124,21 @@ Esta implementação inclui diversas otimizações de performance:
 - Funções de comparação de bytes otimizadas
 - Operações zero-copy quando possível
 - Otimizações de compilador com configurações agressivas
+- Perfil de release otimizado no Cargo.toml
+
+## Estrutura do Projeto
+
+O projeto é organizado em módulos específicos:
+
+- **main.rs**: Ponto de entrada, interface de usuário e seleção de modos
+- **bitcoin.rs**: Implementações específicas para Bitcoin (derivação de chaves, etc.)
+- **bitcoin_puzzle.rs**: Implementação dos desafios Bitcoin Puzzle TX
+- **bitcoin_puzzle_test.rs**: Configurações para o modo de treinamento
+- **search.rs**: Algoritmos de busca e verificação de chaves
+- **performance.rs**: Detecção de recursos e otimizações
+- **models.rs**: Estruturas de dados compartilhadas
+- **colors.rs**: Formatação de cores para terminal
+- **data.rs**: Dados estáticos e constantes
 
 ## Desenvolvimento
 
@@ -139,6 +165,9 @@ Isso mantém o repositório limpo, contendo apenas código fonte e documentaçã
 - Modo de treinamento com puzzles de baixa dificuldade para verificação do funcionamento
 - Modo de teste de ranges para análise da magnitude do desafio
 - Ajuste automático de parâmetros com base no hardware disponível
+- Suporte para endereços P2PKH (começando com '1')
+- Conversão automática de endereços para hash160
+- Base de dados interna com puzzles não resolvidos
 
 ## Licença
 
