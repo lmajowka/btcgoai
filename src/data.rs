@@ -12,6 +12,7 @@ pub enum DataError {
     IoError(std::io::Error),
     JsonError(serde_json::Error),
     HexError(hex::FromHexError),
+    #[allow(dead_code)]
     ConversionError(String),
 }
 
@@ -47,6 +48,7 @@ impl From<hex::FromHexError> for DataError {
 }
 
 // Load wallet addresses from data/wallets.json
+#[allow(dead_code)]
 pub fn load_wallet_addresses() -> Result<Vec<String>, DataError> {
     let file = File::open("data/wallets.json")?;
     let reader = BufReader::new(file);
@@ -55,6 +57,7 @@ pub fn load_wallet_addresses() -> Result<Vec<String>, DataError> {
 }
 
 // Load wallet hash160 values from data/hash160s.json
+#[allow(dead_code)]
 pub fn load_wallet_hash160s() -> Result<Vec<Vec<u8>>, DataError> {
     let path = Path::new("data/hash160s.json");
     
@@ -78,6 +81,7 @@ pub fn load_wallet_hash160s() -> Result<Vec<Vec<u8>>, DataError> {
 }
 
 // Convert addresses to hash160 values (fallback function)
+#[allow(dead_code)]
 fn convert_addresses_to_hash160() -> Result<Vec<Vec<u8>>, DataError> {
     let _addresses = load_wallet_addresses()?;
     
@@ -90,6 +94,7 @@ fn convert_addresses_to_hash160() -> Result<Vec<Vec<u8>>, DataError> {
 }
 
 // Load ranges from data/ranges.json
+#[allow(dead_code)]
 pub fn load_ranges() -> Result<Vec<Range>, DataError> {
     let file = File::open("data/ranges.json")?;
     let reader = BufReader::new(file);

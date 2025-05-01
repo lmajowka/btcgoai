@@ -1,9 +1,6 @@
 use crate::models::Range;
 use std::collections::HashMap;
-use bitcoin::address::{Address, Payload};
-use std::str::FromStr;
 use hex;
-use bitcoin_hashes::Hash;
 use bs58;
 
 // Estrutura para representar um puzzle específico
@@ -12,6 +9,7 @@ pub struct BitcoinPuzzle {
     pub address: String,           // Endereço Bitcoin
     pub reward: f64,               // Recompensa aproximada em BTC
     pub bits: u32,                 // Número de bits do espaço de busca
+    #[allow(dead_code)]
     pub status: String,            // "solved" ou "unsolved"
     pub hash160: Vec<u8>,          // Hash160 do endereço (RIPEMD160(SHA256(pubkey)))
 }
@@ -143,6 +141,7 @@ pub fn convert_addresses_to_hash160(puzzles: &mut Vec<BitcoinPuzzle>) -> Result<
 }
 
 // Retorna um mapa de puzzles por endereço para busca rápida
+#[allow(dead_code)]
 pub fn get_puzzles_by_address(puzzles: &Vec<BitcoinPuzzle>) -> HashMap<String, &BitcoinPuzzle> {
     let mut map = HashMap::new();
     for puzzle in puzzles {

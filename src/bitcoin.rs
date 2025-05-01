@@ -7,6 +7,7 @@ use std::fmt;
 #[derive(Debug)]
 pub enum BitcoinError {
     Secp256k1Error(bitcoin::secp256k1::Error),
+    #[allow(dead_code)]
     GeneralError(String),
 }
 
@@ -38,6 +39,7 @@ pub fn pad_private_key(key: &[u8], target_length: usize) -> Vec<u8> {
 }
 
 // Convert a private key to a Bitcoin address
+#[allow(dead_code)]
 pub fn private_key_to_address(private_key_bytes: &[u8]) -> Result<String, BitcoinError> {
     // Create Secp256k1 context
     let secp = Secp256k1::new();

@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::thread;
-use std::cmp::min;
 
 use num_bigint::{BigUint, RandomBits};
 use num_traits::{One, Zero, ToPrimitive};
@@ -20,8 +19,6 @@ use crate::colors;
 const BATCH_SIZE: usize = 1024;
 // Frequência de atualização das estatísticas (em segundos)
 const STATS_UPDATE_INTERVAL: u64 = 5;
-// Intervalo entre verificações de match encontrado (ms)
-const MATCH_CHECK_INTERVAL_MS: u64 = 100;
 
 // Compare two byte slices for equality - versão otimizada
 fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
