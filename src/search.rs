@@ -11,7 +11,7 @@ use chrono::Local;
 use rayon::prelude::*;
 use hex;
 
-use crate::bitcoin::{pad_private_key, private_key_to_hash160, private_key_to_wif, private_key_to_p2pkh_address};
+use crate::bitcoin::{pad_private_key, private_key_to_hash160, private_key_to_wif, private_key_to_p2pkh_address, validate_private_key_for_hash160};
 use crate::colors;
 use crate::performance;
 
@@ -257,6 +257,216 @@ pub fn search_for_private_key(min_key: &BigUint, max_key: &BigUint, target_hash1
             colors::CYAN, keys_per_second / 1_000_000.0, colors::RESET);
 }
 
+// Helper function to convert &[u8] to &[u8; 20]
+fn convert_to_hash160_array(input: &[u8]) -> Result<[u8; 20], &'static str> {
+    if input.len() != 20 {
+        return Err("Invalid hash160 length");
+    }
+    
+    let mut result = [0u8; 20];
+    result.copy_from_slice(input);
+    Ok(result)
+}
+
+/// Try to process a chunk with GPU, falling back to CPU if necessary
+fn process_chunk_with_fallback(
+    min_key: &BigUint,
+    max_key: &BigUint, 
+    target_hash160: &[u8],
+    gpu_searcher: &mut OptionalGpuSearcher,
+    batch_size: usize,
+    chunk_index: usize,
+    total_chunks: usize
+) -> Option<String> {
+    // Check if target is valid
+    if target_hash160.len() != 20 {
+        return None;
+    }
+    
+    // Convert target_hash160 to [u8; 20] for GPU processing
+    let target_array = match convert_to_hash160_array(target_hash160) {
+        Ok(arr) => arr,
+        Err(_) => return None, // Invalid target hash
+    };
+    
+    // Try to convert the range to u64 for GPU processing
+    // If the range is too large, we'll split it further or use CPU
+    let min_key_bits = min_key.bits();
+    let max_key_bits = max_key.bits();
+    
+    let range_too_large_for_direct_gpu = min_key_bits > 63 || max_key_bits > 63;
+    
+    // Calculate range size
+    let range_size = max_key - min_key;
+    let range_bits = range_size.bits();
+    
+    // Format user-friendly output showing the range
+    let min_key_hex = format!("{:x}", min_key);
+    let max_key_hex = format!("{:x}", max_key);
+    
+    // Only display a portion of very large keys to avoid cluttering the console
+    let min_display = if min_key_hex.len() > 20 {
+        format!("{}...", &min_key_hex[0..16])
+    } else {
+        min_key_hex.clone()
+    };
+    
+    let max_display = if max_key_hex.len() > 20 {
+        format!("{}...", &max_key_hex[0..16])
+    } else {
+        max_key_hex.clone()
+    };
+    
+    println!("{}Chunk {}/{}: Range {} - {} ({} bits){}", 
+             crate::colors::CYAN, chunk_index, total_chunks, 
+             min_display, max_display, range_bits,
+             crate::colors::RESET);
+    
+    // Try GPU for ranges within reasonable size
+    #[cfg(feature = "opencl")]
+    if let Some(searcher) = gpu_searcher.as_mut() {
+        if !range_too_large_for_direct_gpu && range_bits < 64 {
+            // Range fits within u64, can use GPU directly
+            let min_u64 = min_key.to_u64().unwrap_or(0);
+            let max_u64 = max_key.to_u64().unwrap_or(u64::MAX);
+            
+            println!("{}GPU iniciando busca no range: {} - {}{}", 
+                     crate::colors::GREEN, min_u64, max_u64, crate::colors::RESET);
+            
+            match searcher.search_direct(&target_array, min_u64, max_u64, batch_size) {
+                Ok(found_keys) => {
+                    if !found_keys.is_empty() {
+                        // Process found keys
+                        for key in found_keys {
+                            // Convert the u64 key to a hex string
+                            let key_hex = format!("{:x}", key);
+                            let key_bytes = match hex::decode(&key_hex) {
+                                Ok(bytes) => bytes,
+                                Err(_) => continue,
+                            };
+                            
+                            // Validate the key
+                            if validate_private_key_for_hash160(&key_bytes, target_hash160) {
+                                return Some(key_hex);
+                            }
+                        }
+                    }
+                    return None; // No valid key found in this range
+                },
+                Err(e) => {
+                    println!("{}GPU error: {}, switching to CPU for this chunk{}", 
+                             crate::colors::YELLOW, e, crate::colors::RESET);
+                    // Fall through to CPU processing
+                }
+            }
+        } else {
+            // Range is too large for direct GPU processing
+            println!("{}Range muito grande para GPU ({} bits), processando com CPU{}", 
+                     crate::colors::YELLOW, range_bits, crate::colors::RESET);
+        }
+    }
+    
+    // CPU processing for this chunk
+    println!("{}Processando com CPU: {} - {}{}", 
+             crate::colors::BLUE, min_display, max_display, crate::colors::RESET);
+    
+    // Process the chunk on CPU, breaking it into smaller pieces if needed
+    let max_cpu_chunk_size = BigUint::from(1_000_000_000u64); // 1 billion keys per CPU sub-chunk
+    
+    if range_size > max_cpu_chunk_size {
+        // Break into smaller sub-chunks for CPU
+        let num_subchunks = (range_size.clone() + max_cpu_chunk_size.clone() - BigUint::from(1u32))
+            / max_cpu_chunk_size.clone();
+        
+        let subchunk_size = range_size.clone() / num_subchunks.clone();
+        
+        println!("{}CPU: Dividindo range em {} sub-chunks{}", 
+                 crate::colors::BLUE, num_subchunks, crate::colors::RESET);
+        
+        let mut current = min_key.clone();
+        
+        for i in 0..num_subchunks.to_u64().unwrap_or(1) {
+            let subchunk_end = if i == num_subchunks.to_u64().unwrap_or(1) - 1 {
+                max_key.clone()
+            } else {
+                current.clone() + subchunk_size.clone()
+            };
+            
+            println!("{}CPU sub-chunk {}/{}{}", 
+                     crate::colors::BLUE, i+1, num_subchunks, crate::colors::RESET);
+            
+            let result = search_key_range_cpu(&current, &subchunk_end, target_hash160, batch_size);
+            
+            if let Some(key) = result {
+                return Some(key);
+            }
+            
+            current = subchunk_end + BigUint::from(1u32);
+        }
+        
+        return None;
+    } else {
+        // Process the entire chunk directly on CPU
+        search_key_range_cpu(min_key, max_key, target_hash160, batch_size)
+    }
+}
+
+// Process a range of keys directly on CPU
+fn search_key_range_cpu(
+    min_key: &BigUint,
+    max_key: &BigUint,
+    target_hash160: &[u8],
+    batch_size: usize
+) -> Option<String> {
+    // Use the optimized CPU approach
+    let mut current_key = min_key.clone();
+    
+    // Process keys in batches
+    let mut keys_buffer = Vec::with_capacity(batch_size);
+    let increment = BigUint::from(batch_size);
+    
+    while current_key <= *max_key {
+        // Clear the buffer for this batch
+        keys_buffer.clear();
+        
+        // Calculate the end of this batch
+        let batch_end = std::cmp::min(
+            &current_key + &increment, 
+            max_key.clone() + BigUint::from(1u32)
+        );
+        
+        // Fill the buffer with keys for this batch
+        let mut key = current_key.clone();
+        while key < batch_end {
+            keys_buffer.push(key.clone());
+            key += 1u32;
+        }
+        
+        // Process this batch
+        for key in &keys_buffer {
+            // Count this key as checked
+            crate::performance::increment_keys_checked(1);
+            
+            // Convert to bytes and check
+            let key_hex = format!("{:x}", key);
+            let key_bytes = match hex::decode(&key_hex) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            
+            // Validate the key
+            if validate_private_key_for_hash160(&key_bytes, target_hash160) {
+                return Some(key_hex);
+            }
+        }
+        
+        // Move to the next batch
+        current_key = batch_end;
+    }
+    
+    None
+}
+
 /// Search for a private key optimized version with GPU support
 #[allow(clippy::too_many_arguments)]
 pub fn search_for_private_key_optimized(
@@ -265,6 +475,9 @@ pub fn search_for_private_key_optimized(
     batch_size: usize,
     mut gpu_searcher: OptionalGpuSearcher,
 ) -> Option<String> {
+    // Initialize a start time for this search
+    let search_start_time = Instant::now();
+    
     let mut found_key: Option<String> = None;
     
     // Reset the counter
@@ -278,419 +491,68 @@ pub fn search_for_private_key_optimized(
     }
     
     // Create a fixed-size array for the target hash
-    let mut target_hash_arr = [0u8; 20];
-    target_hash_arr.copy_from_slice(target_hash160);
+    let mut target_array: [u8; 20] = [0; 20];
+    target_array.copy_from_slice(target_hash160);
     
-    // Determine if GPU is available
-    #[cfg(feature = "opencl")]
-    let gpu_available = gpu_searcher.is_some();
-    
-    #[cfg(not(feature = "opencl"))]
-    let gpu_available = false;
-    
-    // Create channel to communicate between threads
-    let (tx, rx) = std::sync::mpsc::channel();
-    
-    // Flag to track if GPU has failed or is unavailable
-    let gpu_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!gpu_available));
-    
-    // Store progress information
+    // For better feedback, calculate the total number of ranges
     let total_ranges = search_ranges.len();
-    let search_start_time = std::time::Instant::now();
-    let mut last_status_time = std::time::Instant::now();
     
-    // Count of completed chunks
-    let completed_chunks = std::sync::atomic::AtomicUsize::new(0);
-    
-    // Track GPU vs CPU usage
-    let gpu_processed_chunks = std::sync::atomic::AtomicUsize::new(0);
-    let cpu_processed_chunks = std::sync::atomic::AtomicUsize::new(0);
+    // Track GPU vs CPU usage (for statistics)
+    let _gpu_processed_chunks = std::sync::atomic::AtomicUsize::new(0);
+    let _cpu_processed_chunks = std::sync::atomic::AtomicUsize::new(0);
     
     println!("{}Iniciando busca com {} chunks...{}", 
              crate::colors::BOLD_GREEN, total_ranges, crate::colors::RESET);
     
-    // Start CPU search for all ranges
+    // Start search for all ranges
     for (i, (min, max)) in search_ranges.iter().enumerate() {
-        // Skip if we already found the key
-        if let Ok(Some(_)) = rx.try_recv() {
+        // Try to process this chunk with available methods
+        let chunk_result = process_chunk_with_fallback(
+            min, max, target_hash160, &mut gpu_searcher, batch_size, i+1, total_ranges
+        );
+        
+        if let Some(key) = chunk_result {
+            found_key = Some(key);
             break;
         }
         
-        // Try GPU search for suitable ranges first
-        #[cfg(feature = "opencl")]
-        let processed_by_gpu = {
-            // Only try GPU if it's available and hasn't failed previously
-            if gpu_available && !gpu_failed.load(std::sync::atomic::Ordering::SeqCst) {
-                // Only process with GPU if range fits in u64
-                if let (Some(min_u64), Some(max_u64)) = (min.to_u64(), max.to_u64()) {
-                    // Get the range size to check if it's suitable for GPU
-                    let range_size = max_u64.saturating_sub(min_u64);
-                    
-                    // Set a limit for ranges that GPU can handle
-                    let max_gpu_range = 10_000_000_000u64; // 10 billion
-                    
-                    // Only process with GPU if range isn't too large
-                    if range_size <= max_gpu_range {
-                        // Process with GPU if possible
-                        if let Some(ref mut searcher) = gpu_searcher {
-                            println!("{}GPU procurando chunk {}/{} [Range: {} - {}]{}",
-                                    crate::colors::MAGENTA, i+1, total_ranges, 
-                                    min_u64, max_u64,
-                                    crate::colors::RESET);
-                            
-                            // Try to search using GPU
-                            match searcher.search_direct(&target_hash_arr, min_u64, max_u64, batch_size) {
-                                Ok(found_keys) => {
-                                    // Check if any keys were found
-                                    if !found_keys.is_empty() {
-                                        // Send the first found key back
-                                        let key_hex = format!("{:x}", found_keys[0]);
-                                        found_key = Some(key_hex.clone());
-                                        println!("{}GPU ENCONTROU UMA CHAVE! {}{}", 
-                                                crate::colors::BOLD_GREEN, key_hex, 
-                                                crate::colors::RESET);
-                                        // Skip CPU search
-                                        true
-                                    } else {
-                                        // Update the keys checked counter
-                                        let range_size = max_u64 - min_u64;
-                                        KEYS_CHECKED.fetch_add(range_size as usize / 10, std::sync::atomic::Ordering::Relaxed);
-                                        
-                                        // Increment completed and GPU chunk counters
-                                        completed_chunks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                        gpu_processed_chunks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                        
-                                        println!("{}GPU completou chunk {}/{} (sem resultados){}",
-                                                crate::colors::CYAN, i+1, total_ranges, 
-                                                crate::colors::RESET);
-                                        
-                                        // Skip CPU search
-                                        true
-                                    }
-                                },
-                                Err(e) => {
-                                    // Log the error
-                                    println!("{}Erro GPU (chunk {}/{}): {}{}", 
-                                            crate::colors::RED, i+1, total_ranges, e,
-                                            crate::colors::RESET);
-                                    
-                                    // Increment failure counter (static to persist across chunks)
-                                    static GPU_FAILURES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                                    let failures = GPU_FAILURES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                                    
-                                    // If too many failures, mark GPU as failed
-                                    if failures >= 3 {
-                                        println!("{}Muitas falhas na GPU. Revertendo para CPU.{}", 
-                                                crate::colors::YELLOW, crate::colors::RESET);
-                                        gpu_failed.store(true, std::sync::atomic::Ordering::SeqCst);
-                                    }
-                                    
-                                    // Process with CPU
-                                    false
-                                }
-                            }
-                        } else {
-                            // GPU searcher is not available, process with CPU
-                            false
-                        }
-                    } else {
-                        // Range too large for GPU
-                        println!("{}Chunk {}/{}: Range muito grande para GPU [{} - {}], usando CPU{}", 
-                                crate::colors::YELLOW, i+1, total_ranges, min_u64, max_u64,
-                                crate::colors::RESET);
-                        false
-                    }
-                } else {
-                    // Range doesn't fit in u64, process with CPU
-                    println!("{}Chunk {}/{}: Range não cabe em u64, usando CPU{}", 
-                            crate::colors::YELLOW, i+1, total_ranges,
-                            crate::colors::RESET);
-                    false
-                }
-            } else {
-                // GPU not available or has failed
-                if !gpu_available {
-                    if i == 0 {  // Print only once
-                        println!("{}GPU não disponível, usando apenas CPU{}", 
-                                crate::colors::YELLOW, crate::colors::RESET);
-                    }
-                }
-                false
-            }
-        };
+        // Update progress
+        let keys_checked = KEYS_CHECKED.load(std::sync::atomic::Ordering::SeqCst);
+        let elapsed = search_start_time.elapsed().as_secs();
         
-        #[cfg(not(feature = "opencl"))]
-        let processed_by_gpu = false;
-        
-        // If not processed by GPU, process with CPU
-        if !processed_by_gpu {
-            // Clone values for the CPU thread
-            let tx_clone = tx.clone();
-            let min_clone = min.clone();
-            let max_clone = max.clone();
-            let target_clone = target_hash_arr;
-            let i_clone = i;
-            
-            // Increment CPU chunks counter
-            cpu_processed_chunks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            
-            // Spawn a CPU worker thread
-            std::thread::spawn(move || {
-                println!("{}CPU procurando chunk {}/{}{}", 
-                         crate::colors::GREEN, i_clone+1, total_ranges, 
-                         crate::colors::RESET);
-                
-                if let Some(key) = search_range_for_private_key(&min_clone, &max_clone, &target_clone, batch_size) {
-                    let _ = tx_clone.send(Some((i_clone, key)));
-                } else {
-                    let _ = tx_clone.send(None);
-                    println!("{}CPU completou chunk {}/{} (sem resultados){}", 
-                             crate::colors::CYAN, i_clone+1, total_ranges,
-                             crate::colors::RESET);
-                }
-            });
-        }
-    }
-    
-    // Drop sender to avoid deadlock
-    drop(tx);
-    
-    // If we already found a key with GPU, return it without waiting for CPU threads
-    if found_key.is_some() {
-        return found_key;
-    }
-    
-    // Display progress and check for results from CPU threads
-    let mut found_key_value: Option<String> = None;
-    
-    // Loop until we get a result or all threads finish
-    while found_key_value.is_none() {
-        // Check for results from any thread
-        match rx.recv_timeout(std::time::Duration::from_secs(1)) {
-            Ok(Some((_, key))) => {
-                found_key_value = Some(key);
-                break;
-            },
-            Ok(None) => {
-                // One thread finished without finding
-                completed_chunks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                
-                // If all chunks are done, exit
-                if completed_chunks.load(std::sync::atomic::Ordering::SeqCst) >= total_ranges {
-                    break;
-                }
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Just a timeout, continue
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                // All senders disconnected, we're done
-                break;
-            }
-        }
-        
-        // Update status display every 15 seconds (more frequent updates)
-        let now = std::time::Instant::now();
-        if now.duration_since(last_status_time).as_secs() >= 15 {
-            last_status_time = now;
-            
+        if elapsed > 0 {
             // Calculate speed
-            let elapsed = now.duration_since(search_start_time).as_secs();
-            if elapsed > 0 {
-                let keys_checked = KEYS_CHECKED.load(std::sync::atomic::Ordering::Relaxed);
-                let speed = keys_checked as f64 / elapsed as f64 / 1_000_000.0;
-                
-                // Format time
-                let hours = elapsed / 3600;
-                let minutes = (elapsed % 3600) / 60;
-                let seconds = elapsed % 60;
-                
-                // Display completion percentage
-                let completed = completed_chunks.load(std::sync::atomic::Ordering::SeqCst);
-                let percentage = (completed as f64 / total_ranges as f64) * 100.0;
-                
-                // Get GPU vs CPU stats
-                let gpu_chunks = gpu_processed_chunks.load(std::sync::atomic::Ordering::SeqCst);
-                let cpu_chunks = cpu_processed_chunks.load(std::sync::atomic::Ordering::SeqCst);
-                
-                println!("\n{}==== PROGRESSO DA BUSCA ===={}", crate::colors::BOLD_YELLOW, crate::colors::RESET);
-                println!("{}Tempo decorrido: {:02}:{:02}:{:02}{}", 
-                         crate::colors::CYAN, hours, minutes, seconds, crate::colors::RESET);
-                         
-                println!("{}Chaves verificadas: {} ({:.2} M/s){}", 
-                         crate::colors::CYAN, keys_checked, speed, crate::colors::RESET);
-                         
-                println!("{}Progresso: {}/{} chunks ({:.1}%){}", 
-                         crate::colors::GREEN, completed, total_ranges, percentage, crate::colors::RESET);
-                         
-                println!("{}Distribuição: {} chunks na GPU, {} chunks na CPU{}", 
-                         crate::colors::MAGENTA, gpu_chunks, cpu_chunks, crate::colors::RESET);
-                
-                // Estimativa de tempo restante
-                if speed > 0.0 {
-                    let percentage_remaining = 100.0 - percentage;
-                    let estimated_total_seconds = (elapsed as f64 / percentage) * 100.0;
-                    let remaining_seconds = estimated_total_seconds - elapsed as f64;
-                    
-                    let remaining_hours = (remaining_seconds / 3600.0) as u64;
-                    let remaining_minutes = ((remaining_seconds % 3600.0) / 60.0) as u64;
-                    
-                    println!("{}Tempo restante estimado: {:02}:{:02}:{:02} ({:.1}% restante){}", 
-                            crate::colors::YELLOW, 
-                            remaining_hours, remaining_minutes, (remaining_seconds % 60.0) as u64,
-                            percentage_remaining,
-                            crate::colors::RESET);
-                }
-                
-                println!("{}============================{}\n", 
-                        crate::colors::BOLD_YELLOW, crate::colors::RESET);
-            }
+            let speed = keys_checked as f64 / elapsed as f64;
+            
+            // Only show progress after at least 1 second
+            println!("{}Progresso: {}/{} chunks ({:.2}%) | {:.2}M chaves/s | {} chaves verificadas{}", 
+                     crate::colors::CYAN, 
+                     i+1, total_ranges, 
+                     (i+1) as f64 / total_ranges as f64 * 100.0,
+                     speed / 1_000_000.0,
+                     keys_checked,
+                     crate::colors::RESET);
+            
+            // Estimativa de tempo restante
+            let percentage = (i+1) as f64 / total_ranges as f64 * 100.0;
+            let percentage_remaining = 100.0 - percentage;
+            
+            // Use the current time instead of START_TIME
+            let estimated_total_seconds = (elapsed as f64 / percentage) * 100.0;
+            let remaining_seconds = estimated_total_seconds - elapsed as f64;
+            
+            let remaining_hours = (remaining_seconds / 3600.0) as u64;
+            let remaining_minutes = ((remaining_seconds % 3600.0) / 60.0) as u64;
+            
+            println!("{}Tempo restante estimado: {:02}:{:02}:{:02} ({:.1}% restante){}", 
+                    crate::colors::YELLOW, 
+                    remaining_hours, remaining_minutes, (remaining_seconds % 60.0) as u64,
+                    percentage_remaining,
+                    crate::colors::RESET);
         }
     }
     
-    // Return either the found key from GPU or from CPU threads
-    found_key.or(found_key_value)
-}
-
-/// Search a specific range for a private key
-pub fn search_range_for_private_key(
-    min: &BigUint,
-    max: &BigUint,
-    target_hash160: &[u8; 20],
-    batch_size: usize
-) -> Option<String> {
-    // Creating a range from min to max for iteration
-    let range_diff = max - min;
-    
-    // Batch processing for better performance
-    let mut current = min.clone();
-    
-    while current <= *max {
-        // Calculate batch end
-        let batch_end = if range_diff > batch_size.into() {
-            let next_batch = &current + batch_size;
-            if next_batch > *max {
-                max.clone()
-            } else {
-                next_batch
-            }
-        } else {
-            max.clone()
-        };
-        
-        // Process keys in the current batch - use a loop with increment instead of range
-        let mut key = current.clone();
-        while key <= batch_end {
-            // Check if this key produces the target hash160
-            let padded_key = pad_private_key_internal(&key);
-            
-            // Use crate::bitcoin to access the function
-            if let Ok(hash160) = crate::bitcoin::private_key_to_hash160(&padded_key) {
-                // Compare with target hash - convert Vec<u8> to fixed array reference
-                if hash160 == target_hash160[..] {
-                    // Found the key!
-                    return Some(format!("{:x}", key));
-                }
-            }
-            
-            // Increment key
-            key += 1u32;
-            
-            // Update counter for statistics
-            KEYS_CHECKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        
-        // Move to the next batch
-        current = batch_end + 1u32;
-    }
-    
-    // If execution reaches here, key wasn't found
-    None
-}
-
-// Function to process a chunk with CPU
-fn process_chunk_cpu(
-    min: &BigUint,
-    max: &BigUint,
-    target_hash160: &[u8],
-    batch_size: usize,
-    found: &Arc<AtomicBool>,
-    found_key: &Arc<Mutex<BigUint>>
-) {
-    // Verificar se este chunk está dentro do intervalo minimo possível
-    if max < min {
-        // Intervalo inválido, ignorar
-        return;
-    }
-    
-    // Criar iterador para este intervalo
-    let mut current = min.clone();
-    let mut batch_count = 0;
-    
-    while current <= *max && !found.load(AtomicOrdering::Relaxed) {
-        // Calcular fim do batch atual
-        let batch_end = if &current + batch_size <= *max {
-            &current + batch_size
-        } else {
-            max.clone()
-        };
-        
-        // Calcular tamanho do batch para estatísticas
-        let batch_len = (&batch_end - &current + 1u32).to_usize().unwrap_or(0);
-        
-        // Processar batch somente se necessário
-        if batch_len > 0 && !found.load(AtomicOrdering::Relaxed) {
-            let key_start = current.clone();
-            let mut key = key_start.clone();
-            
-            while key <= batch_end {
-                // Verificar apenas se ainda não encontrou
-                if found.load(AtomicOrdering::Relaxed) {
-                    break;
-                }
-                
-                // Conversão da chave para hash160
-                let padded_key = pad_private_key_internal(&key);
-                
-                // Processar apenas se a conversão para hash160 for bem-sucedida
-                if let Ok(hash160) = crate::bitcoin::private_key_to_hash160(&padded_key) {
-                    // Verificar se corresponde ao alvo
-                    if bytes_equal(&hash160, target_hash160) {
-                        // Encontrou a chave!
-                        let mut found_key_guard = found_key.lock().unwrap();
-                        *found_key_guard = key.clone();
-                        found.store(true, AtomicOrdering::Relaxed);
-                        break;
-                    }
-                }
-                
-                // Próxima chave
-                key += 1u32;
-            }
-            
-            // Atualizar contador para estatísticas
-            KEYS_CHECKED.fetch_add(batch_len, AtomicOrdering::Relaxed);
-            
-            // Debug a cada 10 batches (não muito frequente para não impactar performance)
-            batch_count += 1;
-            if batch_count % 10 == 0 {
-                // Calcular progresso aproximado
-                let progress = if max > min {
-                    let total_range = max - min;
-                    let processed = &current - min;
-                    (processed.to_f64().unwrap_or(0.0) / total_range.to_f64().unwrap_or(1.0) * 100.0).min(100.0)
-                } else {
-                    100.0
-                };
-                
-                print!("\rProgresso: {:.2}% | Verificando: {}", progress, current);
-                std::io::stdout().flush().unwrap_or(());
-            }
-        }
-        
-        // Avançar para próximo batch
-        current = batch_end + 1u32;
-    }
+    found_key
 }
 
 #[cfg(feature = "opencl")]
@@ -910,4 +772,84 @@ pub fn search_for_private_key_optimized_legacy(
     println!("{}Tempo total decorrido: {:.2} segundos{}", colors::CYAN, elapsed.as_secs_f64(), colors::RESET);
     println!("{}Velocidade média: {:.2} M chaves/segundo{}", 
             colors::CYAN, keys_per_second / 1_000_000.0, colors::RESET);
+}
+
+/// Process a chunk with CPU
+fn process_chunk_cpu(
+    chunk_min: &BigUint,
+    chunk_max: &BigUint,
+    target_hash160: &[u8],
+    batch_size: usize,
+    found: &Arc<AtomicBool>,
+    found_key: &Arc<Mutex<BigUint>>
+) {
+    // Skip if we already found the key
+    if found.load(AtomicOrdering::Relaxed) {
+        return;
+    }
+    
+    println!("{}Processando chunk na CPU: {} a {}{}", 
+             crate::colors::BLUE,
+             chunk_min.to_str_radix(16),
+             chunk_max.to_str_radix(16),
+             crate::colors::RESET);
+    
+    // Use the optimized CPU approach with batches
+    let mut current_key = chunk_min.clone();
+    
+    // Process keys in batches
+    let mut keys_buffer = Vec::with_capacity(batch_size);
+    let increment = BigUint::from(batch_size);
+    
+    while &current_key <= chunk_max {
+        // Skip if we already found the key
+        if found.load(AtomicOrdering::Relaxed) {
+            return;
+        }
+        
+        // Clear the buffer for this batch
+        keys_buffer.clear();
+        
+        // Calculate the end of this batch
+        let batch_end = std::cmp::min(
+            &current_key + &increment, 
+            chunk_max.clone() + BigUint::from(1u32)
+        );
+        
+        // Fill the buffer with keys for this batch
+        let mut key = current_key.clone();
+        while key < batch_end {
+            keys_buffer.push(key.clone());
+            key += 1u32;
+        }
+        
+        // Process this batch
+        for key in &keys_buffer {
+            // Skip if we already found the key
+            if found.load(AtomicOrdering::Relaxed) {
+                return;
+            }
+            
+            // Count this key as checked
+            crate::performance::increment_keys_checked(1);
+            
+            // Convert to bytes
+            let padded_key = pad_private_key_internal(key);
+            
+            // Generate Hash160
+            if let Ok(hash160) = private_key_to_hash160(&padded_key) {
+                // Check if hash160 matches target
+                if bytes_equal(&hash160, target_hash160) {
+                    // We found the key!
+                    let mut found_key_guard = found_key.lock().unwrap();
+                    *found_key_guard = key.clone();
+                    found.store(true, AtomicOrdering::Relaxed);
+                    return;
+                }
+            }
+        }
+        
+        // Move to the next batch
+        current_key = batch_end;
+    }
 } 

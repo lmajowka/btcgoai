@@ -122,4 +122,39 @@ pub fn pad_private_key(key: &BigUint) -> Vec<u8> {
     }
     
     bytes
+}
+
+/// Validate if a private key (in bytes) matches a specific Hash160 target
+pub fn validate_private_key_for_hash160(key_bytes: &[u8], target_hash160: &[u8]) -> bool {
+    // Ensure the key is properly formatted as a 32-byte array
+    let padded_key = if key_bytes.len() < 32 {
+        let mut padded = vec![0u8; 32];
+        let start_idx = 32 - key_bytes.len();
+        padded[start_idx..].copy_from_slice(key_bytes);
+        padded
+    } else if key_bytes.len() > 32 {
+        key_bytes[key_bytes.len() - 32..].to_vec()
+    } else {
+        key_bytes.to_vec()
+    };
+    
+    // Generate Hash160 from this key
+    match private_key_to_hash160(&padded_key) {
+        Ok(hash) => {
+            // Compare with target hash
+            if hash.len() != target_hash160.len() {
+                return false;
+            }
+            
+            // Check if all bytes match
+            for i in 0..hash.len() {
+                if hash[i] != target_hash160[i] {
+                    return false;
+                }
+            }
+            
+            true
+        },
+        Err(_) => false,
+    }
 } 

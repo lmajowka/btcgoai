@@ -1,6 +1,7 @@
 use crate::models::Range;
 
 // Estrutura para representar um puzzle de teste (dificuldade menor)
+#[derive(Clone)]
 pub struct TestPuzzle {
     pub puzzle_number: u32,        // Número do puzzle
     pub address: String,           // Endereço Bitcoin
@@ -89,29 +90,101 @@ pub fn puzzle_to_range(puzzle: &TestPuzzle) -> Range {
     }
 }
 
-// Exibe informações sobre o puzzle de teste selecionado
+/// Display information about a test puzzle
 pub fn display_test_puzzle_info(puzzle: &TestPuzzle) {
-    println!("==== Bitcoin Puzzle Test Challenge ====");
-    println!("Puzzle #{}:", puzzle.puzzle_number);
-    println!("Endereço: {}", puzzle.address);
-    println!("Bits: {} (dificuldade baixa para teste)", puzzle.bits);
-    println!("Chave privada conhecida: {}", puzzle.private_key);
+    println!("\n{}Puzzle selecionado:{}", crate::colors::BOLD_GREEN, crate::colors::RESET);
+    println!("{}Dificuldade: {} bits{}", crate::colors::CYAN, puzzle.bits, crate::colors::RESET);
+    println!("{}Endereço Bitcoin: {}{}", crate::colors::CYAN, puzzle.address, crate::colors::RESET);
+    println!("{}Hash160: {}{}", crate::colors::CYAN, hex::encode(&puzzle.hash160), crate::colors::RESET);
     
-    if !puzzle.hash160.is_empty() {
-        println!("Hash160: {}", hex::encode(&puzzle.hash160));
-    }
-    
-    println!("======================================");
+    // No modo de treinamento, também mostramos a chave privada para fins educacionais
+    println!("{}Chave privada (solução): {}{}", crate::colors::MAGENTA, puzzle.private_key, crate::colors::RESET);
 }
 
-/// Find training puzzles within a specific bit range
-pub fn find_training_puzzles(min_bits: u8, max_bits: u8) -> Vec<TestPuzzle> {
-    let mut test_puzzles = get_test_puzzles();
-    // Convert addresses to hash160 for all puzzles
-    let _ = convert_addresses_to_hash160(&mut test_puzzles);
+/// Find training puzzles with difficulties in the specified range
+pub fn find_training_puzzles(min_bits: u32, max_bits: u32) -> Vec<TestPuzzle> {
+    let mut puzzles = Vec::new();
     
-    // Filter by bit range
-    test_puzzles.into_iter()
-        .filter(|puzzle| puzzle.bits >= min_bits as u32 && puzzle.bits <= max_bits as u32)
-        .collect()
+    // Load built-in puzzles
+    let built_in = load_puzzles();
+    
+    // Filter puzzles by difficulty range
+    for p in built_in {
+        if p.bits >= min_bits && p.bits <= max_bits {
+            puzzles.push(p);
+        }
+    }
+    
+    puzzles
+}
+
+/// Load puzzles from built-in data
+fn load_puzzles() -> Vec<TestPuzzle> {
+    let mut puzzles = Vec::new();
+    
+    // Add some test puzzles with known solutions (very small bit ranges for fast testing)
+    // Format: bits, address, private_key
+    // All private keys are in hex format
+    
+    // 5-bit puzzles
+    puzzles.push(TestPuzzle {
+        puzzle_number: 0,
+        bits: 5,
+        address: "17BetZTwF7Tmb7R6RscgQQZFeYYT6YYvYb".to_string(),
+        private_key: "1f".to_string(),
+        hash160: [0u8; 20].to_vec(),
+        status: "solved".to_string(),
+    });
+    
+    // 8-bit puzzles
+    puzzles.push(TestPuzzle {
+        puzzle_number: 1,
+        bits: 8,
+        address: "13sU6LUW2BkpaTrEWu4f7c21b3YGfYSn91".to_string(),
+        private_key: "a3".to_string(),
+        hash160: [0u8; 20].to_vec(),
+        status: "solved".to_string(),
+    });
+    
+    // 12-bit puzzles
+    puzzles.push(TestPuzzle {
+        puzzle_number: 2,
+        bits: 12,
+        address: "1E9nMRheuBGQtbXfiav6Q9jpYTpYKzQgHE".to_string(),
+        private_key: "ab1".to_string(),
+        hash160: [0u8; 20].to_vec(),
+        status: "solved".to_string(),
+    });
+    
+    // 16-bit puzzles
+    puzzles.push(TestPuzzle {
+        puzzle_number: 3,
+        bits: 16,
+        address: "1LdKKwqVxkJfZYS3nkThmNsYVNAXw5Gq9i".to_string(),
+        private_key: "a11e".to_string(),
+        hash160: [0u8; 20].to_vec(),
+        status: "solved".to_string(),
+    });
+    
+    // 20-bit puzzles
+    puzzles.push(TestPuzzle {
+        puzzle_number: 4,
+        bits: 20,
+        address: "1FgN1dXRqxQG7GMdhdFvYH1fJR7a9uDq9w".to_string(),
+        private_key: "a11f3".to_string(),
+        hash160: [0u8; 20].to_vec(),
+        status: "solved".to_string(),
+    });
+    
+    // 22-bit puzzles
+    puzzles.push(TestPuzzle {
+        puzzle_number: 5,
+        bits: 22,
+        address: "1Q2TWHE3GMdB6BZKafqwxXtWAWgFt5Jvm3".to_string(),
+        private_key: "3072af".to_string(),
+        hash160: [0u8; 20].to_vec(),
+        status: "solved".to_string(),
+    });
+    
+    puzzles
 } 

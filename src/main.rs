@@ -326,143 +326,276 @@ fn main() {
 }
 
 fn run_training_mode(params: &performance::SearchParameters, est_keys_per_sec: u64, gpu_searcher: OptionalGpuSearcher) {
-    println!("\n{}Iniciando modo de treinamento...{}", colors::BOLD_GREEN, colors::RESET);
+    println!("{}Modo Treinamento - Bitcoin Puzzles conhecidos{}", colors::BOLD_GREEN, colors::RESET);
+    println!("{}Neste modo, vamos buscar chaves privadas já conhecidas para validar o funcionamento do sistema.{}", 
+             colors::YELLOW, colors::RESET);
     
-    // Mostrar opções de dificuldade
-    println!("\n{}Escolha a dificuldade:{}", colors::BOLD_CYAN, colors::RESET);
-    println!("1. Muito fácil (5-8 bits)");
-    println!("2. Fácil (9-12 bits)");
-    println!("3. Médio (13-16 bits)");
-    println!("4. Difícil (17-22 bits)");
-    println!("5. Custom (defina bits)");
-    
-    // Obter escolha do usuário
-    let difficulty = loop {
-        print!("Escolha (1-5): ");
-        io::stdout().flush().unwrap();
-        
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(_) => {
-                match input.trim().parse::<u8>() {
-                    Ok(1..=5) => break input.trim().parse::<u8>().unwrap(),
-                    _ => println!("{}Opção inválida, tente novamente.{}", colors::RED, colors::RESET)
-                }
-            },
-            Err(_) => println!("{}Erro ao ler entrada, tente novamente.{}", colors::RED, colors::RESET)
+    // Carregar puzzles de treinamento
+    let puzzles = match find_training_puzzles() {
+        Some(p) => p,
+        None => {
+            println!("{}Erro ao carregar puzzles de treinamento.{}", colors::RED, colors::RESET);
+            return;
         }
     };
     
-    // Definir intervalo de bits com base na dificuldade
-    let (min_bits, max_bits) = match difficulty {
-        1 => (5, 8),
-        2 => (9, 12),
-        3 => (13, 16),
-        4 => (17, 22),
-        5 => {
-            // Permitir personalização dos bits
-            let bits = loop {
-                print!("Digite o número de bits (5-22): ");
-                io::stdout().flush().unwrap();
-                
-                let mut input = String::new();
-                match io::stdin().read_line(&mut input) {
-                    Ok(_) => {
-                        match input.trim().parse::<u8>() {
-                            Ok(b) if b >= 5 && b <= 22 => break b,
-                            _ => println!("{}Valor inválido, digite um número entre 5 e 22.{}", colors::RED, colors::RESET)
+    // Mostrar puzzles disponíveis
+    println!("\n{}Puzzles disponíveis para treinamento:{}", colors::BOLD_CYAN, colors::RESET);
+    for (i, puzzle) in puzzles.iter().enumerate() {
+        println!("{}. Dificuldade: {} bits | Endereço: {}", 
+                 i+1, puzzle.bits, puzzle.address);
+    }
+    
+    // Selecionar puzzle
+    println!("\n{}Digite o número do puzzle que deseja testar, ou 0 para testar todos:{}", 
+             colors::BOLD_YELLOW, colors::RESET);
+    let mut selection = String::new();
+    std::io::stdin().read_line(&mut selection).expect("Falha ao ler entrada");
+    let index = selection.trim().parse::<usize>().unwrap_or(0);
+    
+    if index == 0 {
+        // Executar todos os puzzles em ordem de dificuldade
+        run_all_training_puzzles(&puzzles, params, est_keys_per_sec, gpu_searcher);
+    } else if index <= puzzles.len() {
+        // Executar apenas o puzzle selecionado
+        let puzzle = &puzzles[index-1];
+        run_single_training_puzzle(puzzle, params, est_keys_per_sec, gpu_searcher);
+    } else {
+        println!("{}Seleção inválida.{}", colors::RED, colors::RESET);
+    }
+}
+
+fn run_all_training_puzzles(
+    puzzles: &[bitcoin_puzzle_test::TestPuzzle], 
+    params: &performance::SearchParameters, 
+    est_keys_per_sec: u64,
+    mut gpu_searcher: OptionalGpuSearcher
+) {
+    let mut success_count = 0;
+    let start_time = std::time::Instant::now();
+    
+    println!("{}Iniciando teste de todos os puzzles...{}", colors::BOLD_GREEN, colors::RESET);
+    
+    // Ordenar puzzles por dificuldade (bits)
+    let mut sorted_puzzles = puzzles.to_vec();
+    sorted_puzzles.sort_by_key(|p| p.bits);
+    
+    for (i, puzzle) in sorted_puzzles.iter().enumerate() {
+        println!("\n{}Testando puzzle {}/{} ({} bits){}", 
+                 colors::BOLD_CYAN, i+1, sorted_puzzles.len(), puzzle.bits, colors::RESET);
+        
+        // Create a new GPU searcher for each puzzle (to avoid ownership issues)
+        #[cfg(feature = "opencl")]
+        let puzzle_gpu_searcher = match &gpu_searcher {
+            Some(_) => {
+                // Create a new GPU searcher
+                match crate::gpu::GpuSearcher::new() {
+                    Ok(mut new_searcher) => {
+                        // Initialize with the same device
+                        if let Err(e) = new_searcher.select_device(0) {
+                            println!("{}Erro ao selecionar dispositivo GPU: {}{}", 
+                                     colors::YELLOW, e, colors::RESET);
+                            None
+                        } else if let Err(e) = new_searcher.initialize_program() {
+                            println!("{}Erro ao inicializar programa OpenCL: {}{}", 
+                                     colors::YELLOW, e, colors::RESET);
+                            None
+                        } else {
+                            Some(new_searcher)
                         }
                     },
-                    Err(_) => println!("{}Erro ao ler entrada, tente novamente.{}", colors::RED, colors::RESET)
+                    Err(e) => {
+                        println!("{}Erro ao criar novo GPU searcher: {}{}", 
+                                 colors::YELLOW, e, colors::RESET);
+                        None
+                    }
                 }
-            };
-            (bits, bits)
-        },
-        _ => unreachable!()
+            },
+            None => None
+        };
+        
+        #[cfg(not(feature = "opencl"))]
+        let puzzle_gpu_searcher = None;
+        
+        // Executar o puzzle
+        let found = run_single_training_puzzle(puzzle, params, est_keys_per_sec, puzzle_gpu_searcher);
+        
+        if found {
+            success_count += 1;
+        }
+    }
+    
+    // Exibir resultados
+    let elapsed = start_time.elapsed().as_secs();
+    println!("\n{}Resultados do treinamento:{}", colors::BOLD_GREEN, colors::RESET);
+    println!("{}Total de puzzles: {}{}", colors::CYAN, sorted_puzzles.len(), colors::RESET);
+    println!("{}Puzzles resolvidos: {}{}", colors::CYAN, success_count, colors::RESET);
+    println!("{}Tempo total: {} segundos{}", colors::CYAN, elapsed, colors::RESET);
+}
+
+fn run_single_training_puzzle(
+    puzzle: &bitcoin_puzzle_test::TestPuzzle, 
+    params: &performance::SearchParameters, 
+    est_keys_per_sec: u64,
+    gpu_searcher: OptionalGpuSearcher
+) -> bool {
+    // Mostrar informações do puzzle
+    bitcoin_puzzle_test::display_test_puzzle_info(puzzle);
+    
+    // Calcular range
+    let range = bitcoin_puzzle_test::puzzle_to_range(puzzle);
+    
+    // Mostrar informações da busca
+    // Convert the string range to BigUint for calculations
+    let min = num_bigint::BigUint::parse_bytes(range.min.trim_start_matches("0x").as_bytes(), 16).unwrap();
+    let max = num_bigint::BigUint::parse_bytes(range.max.trim_start_matches("0x").as_bytes(), 16).unwrap();
+    let range_size = &max - &min;
+    
+    let keys_per_sec = est_keys_per_sec; // Always use the estimated keys per second
+    let est_seconds = range_size.to_f64().unwrap_or(f64::MAX) / keys_per_sec as f64;
+    
+    println!("{}Intervalo de busca:{}", colors::BOLD_CYAN, colors::RESET);
+    println!("{}De: {}{}", colors::CYAN, range.min, colors::RESET);
+    
+    // Check bit size using the BigUint instead of String
+    if max.bits() <= 64 {
+        println!("{}Até: {} (2^{}){}", colors::CYAN, range.max, puzzle.bits, colors::RESET);
+    } else {
+        println!("{}Até: 2^{}{}", colors::CYAN, puzzle.bits, colors::RESET);
+    }
+    
+    if est_seconds < 0.001 {
+        println!("{}Estimativa de tempo: <1ms{}", colors::YELLOW, colors::RESET);
+    } else if est_seconds < 1.0 {
+        println!("{}Estimativa de tempo: {:.1} ms{}", colors::YELLOW, est_seconds * 1000.0, colors::RESET);
+    } else if est_seconds < 60.0 {
+        println!("{}Estimativa de tempo: {:.2} segundos{}", colors::YELLOW, est_seconds, colors::RESET);
+    } else {
+        println!("{}Estimativa de tempo: {:.2} minutos{}", colors::YELLOW, est_seconds / 60.0, colors::RESET);
+    }
+    
+    // Criar ranges para busca - adjust to use params.threads instead of num_threads
+    let chunks = std::cmp::min(44, params.threads * 4);
+    let mut ranges = Vec::with_capacity(chunks as usize);
+    
+    // Dividir o intervalo em partes iguais
+    let chunk_size = if range_size > (chunks as u32).into() {
+        &range_size / chunks
+    } else {
+        range_size.clone()
     };
     
-    // Selecionar um puzzle aleatório com a dificuldade escolhida
-    let puzzles = bitcoin_puzzle_test::find_training_puzzles(min_bits, max_bits);
-    
-    if puzzles.is_empty() {
-        println!("{}Não foram encontrados puzzles com essa dificuldade.{}", colors::RED, colors::RESET);
-        return;
+    let mut start = min.clone();
+    for i in 0..chunks {
+        let end = if i == chunks - 1 {
+            max.clone()
+        } else {
+            &start + &chunk_size
+        };
+        
+        ranges.push((start.clone(), end.clone()));
+        start = end + num_bigint::BigUint::from(1u32);  // Explicitly convert 1u32 to BigUint
     }
     
-    // Escolher um puzzle aleatório
-    let mut rng = rand::thread_rng();
-    let selected_puzzle = &puzzles[rng.gen_range(0..puzzles.len())];
+    // Iniciar a busca
+    println!("{}Iniciando busca...{}", colors::BOLD_GREEN, colors::RESET);
     
-    println!("\n{}Puzzle selecionado:{}", colors::BOLD_GREEN, colors::RESET);
-    println!("{}Dificuldade: {} bits{}", colors::CYAN, selected_puzzle.bits, colors::RESET);
-    println!("{}Endereço Bitcoin: {}{}", colors::CYAN, selected_puzzle.address, colors::RESET);
-    println!("{}Hash160: {}{}", colors::CYAN, hex::encode(&selected_puzzle.hash160), colors::RESET);
+    // Chamar a função de busca
+    let found_key = search::search_for_private_key_optimized(&ranges, &puzzle.hash160, params.batch_size, gpu_searcher);
     
-    // No modo de treinamento, também mostramos a chave privada para fins educacionais
-    println!("{}Chave privada (solução): {}{}", colors::MAGENTA, selected_puzzle.private_key, colors::RESET);
-    
-    // Criar intervalo de busca
-    let key_value = u64::from_str_radix(&selected_puzzle.private_key, 16).unwrap_or(0);
-    let range_start = key_value.saturating_sub(1000);
-    let range_end = key_value.saturating_add(1000);
-    
-    println!("\n{}Intervalo de busca:{}", colors::YELLOW, colors::RESET);
-    println!("{}De: {}{}", colors::CYAN, range_start, colors::RESET);
-    println!("{}Até: {}{}", colors::CYAN, range_end, colors::RESET);
-    
-    // Calcular estimativa de tempo
-    let range_size = range_end as u64 - range_start as u64;
-    let estimated_time = range_size as f64 / est_keys_per_sec as f64;
-    
-    println!("\n{}Estimativa de tempo: {:.2} segundos{}", 
-             colors::YELLOW, estimated_time, colors::RESET);
-    
-    // Criar chunks para processamento paralelo
-    let min_key = BigUint::from(range_start);
-    let max_key = BigUint::from(range_end);
-    let chunks = performance::optimize_workload_distribution(&min_key, &max_key, params);
-    
-    println!("{}Iniciando busca com {} chunks...{}", 
-             colors::GREEN, chunks.len(), colors::RESET);
-    
-    // Reset counter
-    performance::reset_keys_checked();
-    
-    // Realizar a busca com parâmetros otimizados e possível aceleração por GPU
-    let result = search::search_for_private_key_optimized(&chunks, &selected_puzzle.hash160, params.batch_size, gpu_searcher);
-    
-    // Processar o resultado
-    if let Some(found_key_hex) = result {
-        println!("\n{}CHAVE ENCONTRADA!{}", colors::BOLD_GREEN, colors::RESET);
-        println!("{}Chave privada (hex): {}{}", colors::GREEN, found_key_hex, colors::RESET);
+    if let Some(key) = found_key {
+        // Verificar se a chave encontrada é a correta
+        let expected_key = &puzzle.private_key;
         
-        // Verificar se a chave encontrada corresponde à esperada
-        if found_key_hex == selected_puzzle.private_key {
-            println!("{}SUCESSO! A chave encontrada é a correta!{}", colors::BOLD_GREEN, colors::RESET);
-        } else {
-            println!("{}ATENÇÃO: A chave encontrada é diferente da esperada!{}", colors::BOLD_YELLOW, colors::RESET);
-            println!("{}Chave esperada: {}{}", colors::YELLOW, selected_puzzle.private_key, colors::RESET);
-        }
+        // Normalizar chaves para comparação (remover zeros à esquerda)
+        let found_key_normalized = key.trim_start_matches('0');
+        let expected_normalized = expected_key.trim_start_matches('0');
         
-        // Converter a chave hex para formato binário
-        if let Ok(key_bytes) = hex::decode(&found_key_hex) {
-            // Criar WIF e endereço
-            match bitcoin::private_key_to_wif(&key_bytes) {
-                Ok(wif) => println!("{}Chave privada (WIF): {}{}", colors::GREEN, wif, colors::RESET),
-                Err(e) => println!("{}Erro ao gerar WIF: {:?}{}", colors::RED, e, colors::RESET),
-            }
-            
-            match bitcoin::private_key_to_p2pkh_address(&key_bytes) {
-                Ok(addr) => println!("{}Endereço Bitcoin: {}{}", colors::GREEN, addr, colors::RESET),
-                Err(e) => println!("{}Erro ao gerar endereço: {:?}{}", colors::RED, e, colors::RESET),
-            }
+        if found_key_normalized.eq_ignore_ascii_case(expected_normalized) {
+            println!("\n{}SUCESSO! Chave encontrada corretamente!{}", colors::BOLD_GREEN, colors::RESET);
+            println!("{}Chave esperada: {}{}", colors::GREEN, expected_key, colors::RESET);
+            println!("{}Chave encontrada: {}{}", colors::GREEN, key, colors::RESET);
+            true
         } else {
-            println!("{}Erro ao decodificar a chave hexadecimal{}", colors::RED, colors::RESET);
+            println!("\n{}AVISO: Chave encontrada não corresponde à esperada!{}", colors::RED, colors::RESET);
+            println!("{}Chave esperada: {}{}", colors::YELLOW, expected_key, colors::RESET);
+            println!("{}Chave encontrada: {}{}", colors::RED, key, colors::RESET);
+            false
         }
     } else {
-        println!("\n{}Busca concluída. Chave privada não encontrada neste intervalo.{}", 
-               colors::RED, colors::RESET);
+        println!("\n{}FALHA: Chave não encontrada.{}", colors::RED, colors::RESET);
+        println!("{}Chave esperada: {}{}", colors::YELLOW, puzzle.private_key, colors::RESET);
+        false
     }
+}
+
+// Helper function to clone the GPU searcher if available
+#[cfg(feature = "opencl")]
+trait GpuSearcherExt {
+    fn clone_if_available(self) -> Self;
+}
+
+#[cfg(feature = "opencl")]
+impl GpuSearcherExt for OptionalGpuSearcher {
+    fn clone_if_available(self) -> Self {
+        match self {
+            Some(_) => {
+                // Create a new GPU searcher
+                match crate::gpu::GpuSearcher::new() {
+                    Ok(mut new_searcher) => {
+                        // Initialize with the same device
+                        if let Err(e) = new_searcher.select_device(0) {
+                            println!("{}Erro ao selecionar dispositivo GPU: {}{}", 
+                                     colors::YELLOW, e, colors::RESET);
+                            return None;
+                        }
+                        
+                        // Initialize OpenCL program
+                        if let Err(e) = new_searcher.initialize_program() {
+                            println!("{}Erro ao inicializar programa OpenCL: {}{}", 
+                                     colors::YELLOW, e, colors::RESET);
+                            return None;
+                        }
+                        
+                        Some(new_searcher)
+                    },
+                    Err(e) => {
+                        println!("{}Erro ao criar novo GPU searcher: {}{}", 
+                                 colors::YELLOW, e, colors::RESET);
+                        None
+                    }
+                }
+            },
+            None => None
+        }
+    }
+}
+
+#[cfg(not(feature = "opencl"))]
+trait GpuSearcherExt {
+    fn clone_if_available(self) -> Self;
+}
+
+#[cfg(not(feature = "opencl"))]
+impl GpuSearcherExt for OptionalGpuSearcher {
+    fn clone_if_available(self) -> Self {
+        None
+    }
+}
+
+// This function now needs to be implemented
+fn find_training_puzzles() -> Option<Vec<bitcoin_puzzle_test::TestPuzzle>> {
+    // Get test puzzles with bits between 5 and 22
+    let mut puzzles = bitcoin_puzzle_test::find_training_puzzles(5, 22);
+    
+    // Convert addresses to hash160
+    if let Err(e) = bitcoin_puzzle_test::convert_addresses_to_hash160(&mut puzzles) {
+        println!("{}Erro ao converter endereços para hash160: {}{}", 
+                 colors::RED, e, colors::RESET);
+        return None;
+    }
+    
+    Some(puzzles)
 }
 
 fn run_range_test_mode(params: &performance::SearchParameters, est_keys_per_sec: u64) {
@@ -693,6 +826,11 @@ fn run_normal_mode(params: &performance::SearchParameters, est_keys_per_sec: u64
         println!("\n{}CHAVE ENCONTRADA!{}", colors::BOLD_GREEN, colors::RESET);
         println!("{}Chave privada (hex): {}{}", colors::GREEN, found_key_hex, colors::RESET);
         
+        // BitcoinPuzzle doesn't have a private_key field for real puzzles, so we can't compare
+        // Just report the found key
+        println!("{}VERIFICAÇÃO: A chave privada foi encontrada mas não pode ser validada (puzzle real).{}", 
+                colors::BOLD_YELLOW, colors::RESET);
+        
         // Converter a chave hex para formato binário
         if let Ok(key_bytes) = hex::decode(&found_key_hex) {
             // Criar WIF e endereço
@@ -704,27 +842,6 @@ fn run_normal_mode(params: &performance::SearchParameters, est_keys_per_sec: u64
             match bitcoin::private_key_to_p2pkh_address(&key_bytes) {
                 Ok(addr) => println!("{}Endereço Bitcoin: {}{}", colors::GREEN, addr, colors::RESET),
                 Err(e) => println!("{}Erro ao gerar endereço: {:?}{}", colors::RED, e, colors::RESET),
-            }
-            
-            // Salvar resultados em arquivo
-            let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-            let filename = format!("found_key_{}.txt", timestamp);
-            
-            if let Ok(mut file) = std::fs::File::create(&filename) {
-                let _ = writeln!(file, "BITCOIN PUZZLE SOLUCIONADO!");
-                let _ = writeln!(file, "Puzzle: {}", selected_puzzle.address);
-                let _ = writeln!(file, "Dificuldade: {} bits", selected_puzzle.bits);
-                let _ = writeln!(file, "Chave privada (hex): {}", found_key_hex);
-                
-                if let Ok(wif) = bitcoin::private_key_to_wif(&key_bytes) {
-                    let _ = writeln!(file, "Chave privada (WIF): {}", wif);
-                }
-                
-                if let Ok(addr) = bitcoin::private_key_to_p2pkh_address(&key_bytes) {
-                    let _ = writeln!(file, "Endereço Bitcoin: {}", addr);
-                }
-                
-                println!("{}Resultados salvos em '{}'{}", colors::YELLOW, filename, colors::RESET);
             }
         } else {
             println!("{}Erro ao decodificar a chave hexadecimal{}", colors::RED, colors::RESET);

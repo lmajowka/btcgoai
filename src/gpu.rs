@@ -5,21 +5,24 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// Add libc for OpenCL sizes
+extern crate libc;
+
 // Import the opencl3 crate conditionally
 #[cfg(feature = "opencl")]
-use opencl3::device::{Device, CL_DEVICE_TYPE_ALL};
+use opencl3::platform::get_platforms;
 #[cfg(feature = "opencl")]
-use opencl3::platform::Platform;
+use opencl3::device::{Device, CL_DEVICE_TYPE_ALL, get_device_ids};
 #[cfg(feature = "opencl")]
 use opencl3::context::Context;
 #[cfg(feature = "opencl")]
-use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
+use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE, enqueue_write_buffer, enqueue_read_buffer, enqueue_nd_range_kernel};
 #[cfg(feature = "opencl")]
 use opencl3::program::Program;
 #[cfg(feature = "opencl")]
-use opencl3::kernel::Kernel;
+use opencl3::kernel::{Kernel, create_kernel};
 #[cfg(feature = "opencl")]
-use opencl3::memory::{Buffer, CL_MEM_READ_ONLY, CL_MEM_WRITE_ONLY};
+use opencl3::memory::{CL_MEM_READ_ONLY, CL_MEM_WRITE_ONLY, CL_MEM_READ_WRITE, CL_MEM_COPY_HOST_PTR, create_buffer, release_mem_object};
 #[cfg(feature = "opencl")]
 use opencl3::types::*;
 
@@ -42,41 +45,42 @@ void calculate_simplified_hash(ulong private_key, __private uchar *hash160) {
 
 // Main search kernel
 __kernel void search_keys(
-    __global const ulong* private_key_ranges,
     __global const uchar* target_hashes,
-    __global const uint* num_targets,
+    __global ulong* found_keys,
     __global uint* results,
-    __global ulong* found_keys
+    uint num_targets,
+    ulong range_start,
+    ulong range_end
 ) {
     // Get global ID
     const size_t gid = get_global_id(0);
     
-    // Check if this work item has a valid range
-    const size_t range_idx = gid * 2;
-    const ulong range_start = private_key_ranges[range_idx];
-    const ulong range_end = private_key_ranges[range_idx + 1];
+    // Calculate this work item's key range
+    const ulong total_items = get_global_size(0);
+    const ulong range_size = range_end - range_start;
+    const ulong keys_per_item = (range_size + total_items - 1) / total_items;
+    
+    const ulong my_start = range_start + gid * keys_per_item;
+    const ulong my_end = min(my_start + keys_per_item, range_end);
     
     // Skip if range is invalid
-    if (range_start >= range_end) {
+    if (my_start >= my_end || my_start >= range_end) {
         return;
     }
-    
-    // Get the number of target hashes
-    const uint targets_count = num_targets[0];
     
     // Initialize temporary buffer for hash computation
     uchar computed_hash[20];
     
     // Number of keys to check per kernel execution
-    const uint keys_per_work_item = 10;
+    const uint keys_per_work_item = 100; // Increased for better performance
     
     // Loop through a small batch of keys in this range
-    for (ulong key = range_start; key < range_end && key < range_start + keys_per_work_item; key++) {
+    for (ulong key = my_start; key < my_end && key < my_start + keys_per_work_item; key++) {
         // Calculate hash160 for this private key (simplified version)
         calculate_simplified_hash(key, computed_hash);
         
         // Check against all targets
-        for (uint t = 0; t < targets_count; t++) {
+        for (uint t = 0; t < num_targets; t++) {
             // Compare with target hash
             bool match = true;
             for (uint i = 0; i < 20; i++) {
@@ -89,7 +93,7 @@ __kernel void search_keys(
             // If found a match
             if (match) {
                 // Atomic increment of results count
-                uint idx = atomic_inc(&results[0]);
+                uint idx = atomic_inc(results);
                 
                 // Check if we have space for this result
                 if (idx < 100) {  // Max 100 results
@@ -101,6 +105,11 @@ __kernel void search_keys(
     }
 }
 "#;
+
+#[cfg(feature = "opencl")]
+const CL_TRUE: cl_bool = 1;
+#[cfg(feature = "opencl")]
+const CL_FALSE: cl_bool = 0;
 
 /// Checks if OpenCL is available on the system
 pub fn check_opencl_availability() -> bool {
@@ -118,7 +127,7 @@ pub fn check_opencl_availability() -> bool {
 
         // Try to check for OpenCL availability
         // First by using the opencl3 library
-        match opencl3::platform::get_platforms() {
+        match get_platforms() {
             Ok(platforms) => {
                 if !platforms.is_empty() {
                     // Found at least one platform
@@ -207,12 +216,12 @@ impl GpuSearcher {
         let mut device_count = 0;
         
         // Get platforms
-        let platforms = opencl3::platform::get_platforms()
+        let platforms = get_platforms()
             .map_err(|e| format!("Failed to get OpenCL platforms: {}", e))?;
         
         // Count devices on all platforms
         for platform in platforms {
-            if let Ok(devices) = opencl3::device::get_device_ids(
+            if let Ok(devices) = get_device_ids(
                 platform.id(), CL_DEVICE_TYPE_ALL) {
                 device_count += devices.len();
             }
@@ -228,11 +237,11 @@ impl GpuSearcher {
             let mut devices = Vec::new();
             
             // Get platforms
-            match opencl3::platform::get_platforms() {
+            match get_platforms() {
                 Ok(platforms) => {
                     for platform in platforms {
                         // Get devices from platform
-                        if let Ok(device_ids) = opencl3::device::get_device_ids(
+                        if let Ok(device_ids) = get_device_ids(
                             platform.id(), CL_DEVICE_TYPE_ALL) {
                             for device_id in device_ids {
                                 // Create device and get name
@@ -314,32 +323,31 @@ impl GpuSearcher {
             let devices = self.list_devices();
             let device_idx = self.selected_device_index.unwrap();
             let device = &devices[device_idx].1;
-            
-            let program = Program::create_from_source(
-                    context.get(),
-                    &[c_src.as_c_str()])
-                .map_err(|e| format!("Failed to create OpenCL program: {}", e))?;
+
+            // Create program with source
+            let program = Program::create_from_source(context.get(), &[c_src.as_c_str()])
+                .map_err(|e| format!("Failed to create program: {}", e))?;
             
             // Build the program
-            let empty_options = std::ffi::CString::new("").unwrap();
-            match program.build(&[device.id()], &empty_options) {
-                Ok(_) => {
-                    self.program = Some(program);
-                    Ok(())
-                },
-                Err(e) => {
-                    // Get the build log to provide more detailed error information
-                    let log = match program.get_build_log(device.id()) {
-                        Ok(log) => log,
-                        Err(_) => "Could not retrieve build log".to_string()
-                    };
-                    
-                    println!("OpenCL Kernel Build Error:");
-                    println!("{}", log);
-                    
-                    Err(format!("Failed to build OpenCL program: {}", e).into())
-                }
+            let build_options = CString::new("").unwrap();
+            let build_result = program.build(&[device.id()], &build_options);
+            
+            if let Err(e) = build_result {
+                // Get the build log for better error diagnostics
+                let build_log = match program.get_build_log(device.id()) {
+                    Ok(log) => log,
+                    Err(_) => "Could not retrieve build log".to_string()
+                };
+                
+                println!("OpenCL Program Build Error:");
+                println!("{}", build_log);
+                
+                return Err(format!("Failed to build OpenCL program: {}", e).into());
             }
+            
+            // Store the program
+            self.program = Some(program);
+            Ok(())
         }
         
         #[cfg(not(feature = "opencl"))]
@@ -385,12 +393,13 @@ impl GpuSearcher {
                 return Err("OpenCL context not initialized. Call initialize_program() first.".into());
             }
             
-            // Define the target data
-            let target_count = targets.len();
-            let mut flattened_targets = Vec::with_capacity(target_count * 20);
-            for target in targets {
-                flattened_targets.extend_from_slice(target);
+            // We can only process one target at a time efficiently
+            if targets.is_empty() {
+                return Ok(vec![]);
             }
+            
+            // Get the first target (we only support one target at a time efficiently)
+            let target_hash = targets.iter().next().unwrap();
             
             // Check if the range is too large for u64
             let range_size = if range_end > range_start {
@@ -399,245 +408,239 @@ impl GpuSearcher {
                 return Ok(vec![]); // Empty range
             };
             
-            // Calculate maximum batch size that GPU can handle
-            // For extremely large ranges, we'll use multiple smaller batches
-            let max_gpu_batch = 1_000_000; // Limit batch size to avoid overflowing GPU
+            // SAFETY CHECK: Limit maximum range size for GPU processing to prevent crashes
+            const MAX_GPU_CHUNK_SIZE: u64 = 100_000_000; // 100 million keys per GPU chunk
             
-            // IMPROVED APPROACH: Set a maximum range size per sub-chunk
-            // This ensures we don't try to process ranges that are too large
-            let max_subchunk_range = 1_000_000_000u64; // 1 billion keys per sub-chunk
-            
-            // Process data in smaller chunks the GPU can handle
-            let mut all_found_keys = Vec::new();
-            
-            // If the range is extremely large, break it into manageable sub-chunks
-            // Using a logarithmic approach to avoid creating too many chunks
-            let total_subchunks = if range_size > max_subchunk_range {
-                let log_range_size = (range_size as f64).log10();
-                let suggested_chunks = (10.0_f64).powf(log_range_size - 9.0).ceil() as u64;
-                std::cmp::max(10, suggested_chunks) // At least 10 subchunks
-            } else {
-                1 // Just one subchunk for small ranges
-            };
-            
-            let subchunk_size = range_size / total_subchunks;
-            
-            if total_subchunks > 1 {
-                println!("{}GPU: Dividindo range em {} sub-chunks (cada um processando ~{} chaves){}", 
-                        crate::colors::CYAN, total_subchunks, subchunk_size, crate::colors::RESET);
-            }
-            
-            // Create a progress bar to update
-            let mut last_progress_update = std::time::Instant::now();
-            
-            // Process each subchunk
-            for subchunk_idx in 0..total_subchunks {
-                let subchunk_start = range_start + (subchunk_idx * subchunk_size);
-                let subchunk_end = if subchunk_idx == total_subchunks - 1 {
-                    range_end // Use exact end for last subchunk
-                } else {
-                    subchunk_start + subchunk_size
-                };
+            // If range is too large, process it in smaller chunks
+            if range_size > MAX_GPU_CHUNK_SIZE {
+                println!("GPU: Range too large ({} keys), splitting into smaller chunks", range_size);
+                let mut all_results = Vec::new();
+                let num_chunks = (range_size + MAX_GPU_CHUNK_SIZE - 1) / MAX_GPU_CHUNK_SIZE;
                 
-                // Sanity check - skip if start/end are equal or invalid
-                if subchunk_end <= subchunk_start || subchunk_start >= range_end {
-                    continue;
-                }
-                
-                // Calculate if this subchunk is too large for GPU
-                if subchunk_end - subchunk_start > max_subchunk_range {
-                    println!("{}Aviso: Valor muito grande para GPU, pulando chunk{}", 
-                            crate::colors::YELLOW, crate::colors::RESET);
-                    continue;
-                }
-                
-                // Update progress
-                let now = std::time::Instant::now();
-                if total_subchunks > 1 && now.duration_since(last_progress_update).as_secs() >= 5 {
-                    let progress_pct = (subchunk_idx as f64 / total_subchunks as f64) * 100.0;
-                    println!("{}GPU Progresso: {:.1}% (sub-chunk {}/{}){}", 
-                            crate::colors::CYAN, progress_pct, subchunk_idx+1, total_subchunks,
-                            crate::colors::RESET);
-                    last_progress_update = now;
-                }
-                
-                // Now process this more manageable subchunk
-                let work_size = std::cmp::min(batch_size, max_gpu_batch);
-                
-                // Calculate step size for processing the subchunk
-                let subchunk_range = subchunk_end - subchunk_start;
-                let items_per_work = (subchunk_range as f64 / work_size as f64).ceil() as u64;
-                
-                // Skip if items_per_work is 0 or too large
-                if items_per_work == 0 || items_per_work > max_subchunk_range {
-                    println!("{}Aviso: Range de trabalho inválido para GPU, pulando{}", 
-                            crate::colors::YELLOW, crate::colors::RESET);
-                    continue;
-                }
-                
-                // Create key ranges for this subchunk
-                let mut key_ranges = Vec::with_capacity(work_size * 2);
-                
-                for i in 0..work_size {
-                    let start = subchunk_start + (i as u64 * items_per_work);
-                    let end = std::cmp::min(
-                        subchunk_start + ((i as u64 + 1) * items_per_work),
-                        subchunk_end
-                    );
+                // Process each chunk
+                for i in 0..num_chunks {
+                    let chunk_start = range_start + i * MAX_GPU_CHUNK_SIZE;
+                    let chunk_end = std::cmp::min(range_start + (i + 1) * MAX_GPU_CHUNK_SIZE, range_end);
                     
-                    // Skip if start >= end
-                    if start >= end {
-                        continue;
+                    println!("GPU: Processing chunk {}/{}: {} - {}", 
+                             i+1, num_chunks, chunk_start, chunk_end);
+                    
+                    // Use a try-catch pattern to handle GPU errors gracefully
+                    match self.safe_gpu_search(target_hash, 1, chunk_start, chunk_end, batch_size) {
+                        Ok(results) => all_results.extend(results),
+                        Err(e) => {
+                            println!("GPU: Error processing chunk: {}", e);
+                            println!("GPU: Falling back to CPU for this chunk");
+                            // Fall back to CPU-based search if GPU search fails
+                            // Just return empty results and let the search algorithm handle CPU fallback
+                            return Err(format!("GPU search failed: {}", e).into());
+                        }
                     }
-                    
-                    key_ranges.push(start);
-                    key_ranges.push(end);
                 }
                 
-                // Skip if no valid ranges
-                if key_ranges.is_empty() {
-                    continue;
-                }
-                
-                // Prepare buffers for OpenCL
-                let context = self.context.as_ref().unwrap();
-                let queue = self.queue.as_ref().unwrap();
-                let program = self.program.as_ref().unwrap();
-                
-                // Create buffers
-                let max_results = 100;
-                let mut results = vec![0u32; 1 + max_results];
-                let mut found_keys = vec![0u64; max_results];
-                let num_targets = vec![target_count as u32];
-                
-                // Create OpenCL buffers
-                let key_ranges_buf = Buffer::create(
-                    context,
-                    CL_MEM_READ_ONLY,
-                    std::mem::size_of::<u64>() * key_ranges.len(),
-                    std::ptr::null_mut()
-                ).map_err(|e| format!("Failed to create key ranges buffer: {}", e))?;
-                
-                let targets_buf = Buffer::create(
-                    context,
-                    CL_MEM_READ_ONLY,
-                    flattened_targets.len(),
-                    std::ptr::null_mut()
-                ).map_err(|e| format!("Failed to create targets buffer: {}", e))?;
-                
-                let num_targets_buf = Buffer::create(
-                    context,
-                    CL_MEM_READ_ONLY,
-                    std::mem::size_of::<u32>(),
-                    std::ptr::null_mut()
-                ).map_err(|e| format!("Failed to create num targets buffer: {}", e))?;
-                
-                let results_buf = Buffer::create(
-                    context,
-                    CL_MEM_WRITE_ONLY,
-                    std::mem::size_of::<u32>() * results.len(),
-                    std::ptr::null_mut()
-                ).map_err(|e| format!("Failed to create results buffer: {}", e))?;
-                
-                let found_keys_buf = Buffer::create(
-                    context,
-                    CL_MEM_WRITE_ONLY,
-                    std::mem::size_of::<u64>() * found_keys.len(),
-                    std::ptr::null_mut()
-                ).map_err(|e| format!("Failed to create found keys buffer: {}", e))?;
-                
-                // Write data to buffers
-                queue.enqueue_write_buffer(&key_ranges_buf, CL_TRUE, 0, 
-                    &key_ranges, &[]).map_err(|e| format!("Failed to write key_ranges: {}", e))?;
-                
-                queue.enqueue_write_buffer(&targets_buf, CL_TRUE, 0, 
-                    &flattened_targets, &[]).map_err(|e| format!("Failed to write targets: {}", e))?;
-                
-                queue.enqueue_write_buffer(&num_targets_buf, CL_TRUE, 0, 
-                    &num_targets, &[]).map_err(|e| format!("Failed to write num_targets: {}", e))?;
-                
-                queue.enqueue_write_buffer(&results_buf, CL_TRUE, 0, 
-                    &results, &[]).map_err(|e| format!("Failed to write results: {}", e))?;
-                
-                queue.enqueue_write_buffer(&found_keys_buf, CL_TRUE, 0, 
-                    &found_keys, &[]).map_err(|e| format!("Failed to write found_keys: {}", e))?;
-                
-                // Create kernel
-                use std::ffi::CString;
-                let kernel_name = CString::new("search_keys").unwrap();
-                
-                // Create the kernel and set arguments
-                let kernel = {
-                    // Create kernel using opencl3 API - access program directly
-                    let kernel_ptr = unsafe {
-                        let program_ptr = program as *const Program as *mut std::ffi::c_void;
-                        opencl3::kernel::create_kernel(
-                            program_ptr, kernel_name.as_c_str())
-                            .map_err(|e| format!("Failed to create kernel: {}", e))?
-                    };
-                    
-                    Kernel::new(kernel_ptr)
-                        .map_err(|e| format!("Failed to create kernel object: {}", e))?
-                };
-                
-                // Set kernel arguments
-                kernel.set_arg(0, &key_ranges_buf)
-                    .map_err(|e| format!("Failed to set kernel arg 0: {}", e))?;
-                
-                kernel.set_arg(1, &targets_buf)
-                    .map_err(|e| format!("Failed to set kernel arg 1: {}", e))?;
-                
-                kernel.set_arg(2, &num_targets_buf)
-                    .map_err(|e| format!("Failed to set kernel arg 2: {}", e))?;
-                
-                kernel.set_arg(3, &results_buf)
-                    .map_err(|e| format!("Failed to set kernel arg 3: {}", e))?;
-                
-                kernel.set_arg(4, &found_keys_buf)
-                    .map_err(|e| format!("Failed to set kernel arg 4: {}", e))?;
-                
-                // Execute kernel
-                let work_items = key_ranges.len() / 2; // Number of actual work items
-                let global_work_size = [work_items];
-                
-                opencl3::command_queue::enqueue_nd_range_kernel(
-                    queue.get(),
-                    kernel.get(),
-                    1, // work_dim
-                    std::ptr::null(),
-                    global_work_size.as_ptr(),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null()
-                ).map_err(|e| format!("Failed to enqueue kernel: {}", e))?;
-                
-                // Read results
-                queue.enqueue_read_buffer(&results_buf, CL_TRUE, 0, &mut results, &[])
-                    .map_err(|e| format!("Failed to read results buffer: {}", e))?;
-                
-                queue.enqueue_read_buffer(&found_keys_buf, CL_TRUE, 0, &mut found_keys, &[])
-                    .map_err(|e| format!("Failed to read found keys buffer: {}", e))?;
-                
-                // Process found keys for this subchunk
-                let num_found = results[0] as usize;
-                if num_found > 0 {
-                    all_found_keys.extend_from_slice(&found_keys[0..num_found.min(max_results)]);
-                    println!("{}GPU ENCONTROU {} CHAVES NO RANGE!{}", 
-                            crate::colors::BOLD_GREEN, num_found, crate::colors::RESET);
-                }
+                return Ok(all_results);
             }
             
-            // Final status update
-            if total_subchunks > 1 {
-                println!("{}GPU: Busca completa em {} sub-chunks{}", 
-                        crate::colors::CYAN, total_subchunks, crate::colors::RESET);
-            }
-            
-            Ok(all_found_keys)
+            // For smaller ranges, process directly
+            self.safe_gpu_search(target_hash, 1, range_start, range_end, batch_size)
         }
         
         #[cfg(not(feature = "opencl"))]
         Err("OpenCL support not compiled in this build".into())
+    }
+
+    /// Safe wrapper for GPU search that handles errors
+    #[cfg(feature = "opencl")]
+    fn safe_gpu_search(
+        &self,
+        target_hash: &[u8; 20],
+        target_count: usize,
+        range_start: u64,
+        range_end: u64,
+        batch_size: usize
+    ) -> Result<Vec<u64>, Box<dyn Error>> {
+        // Check required OpenCL components
+        let context = match &self.context {
+            Some(ctx) => ctx,
+            None => return Err("OpenCL context not initialized".into())
+        };
+        
+        let queue = match &self.queue {
+            Some(q) => q,
+            None => return Err("OpenCL command queue not initialized".into())
+        };
+        
+        let program = match &self.program {
+            Some(p) => p,
+            None => return Err("OpenCL program not initialized".into())
+        };
+        
+        // Safety check - verify range size
+        if range_end <= range_start {
+            return Ok(vec![]);
+        }
+        
+        // Calculate work size with upper limit based on device capabilities
+        let range_size = range_end - range_start;
+        let adjusted_batch_size = std::cmp::min(batch_size, 65536); // Max of 65536 keys per batch
+        
+        // Create buffer for target hash
+        let target_buffer = unsafe {
+            create_buffer(
+                context.get(),
+                CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                std::mem::size_of::<u8>() * 20, // 20 bytes for a single hash160
+                target_hash.as_ptr() as *mut std::ffi::c_void
+            )
+            .map_err(|e| format!("Failed to create target buffer: {}", e))?
+        };
+        
+        // Create buffer for found keys (max 100 results)
+        let result_keys_buffer = unsafe {
+            create_buffer(
+                context.get(),
+                CL_MEM_WRITE_ONLY,
+                std::mem::size_of::<u64>() * 100,
+                std::ptr::null_mut()
+            )
+            .map_err(|e| format!("Failed to create result keys buffer: {}", e))?
+        };
+        
+        // Create buffer for result count
+        let count_buffer = unsafe {
+            create_buffer(
+                context.get(),
+                CL_MEM_READ_WRITE,
+                std::mem::size_of::<u32>(),
+                std::ptr::null_mut()
+            )
+            .map_err(|e| format!("Failed to create count buffer: {}", e))?
+        };
+        
+        // Initialize the count buffer to zero
+        let zero: u32 = 0;
+        unsafe {
+            enqueue_write_buffer(
+                queue.get(),
+                count_buffer,
+                CL_TRUE,
+                0,
+                std::mem::size_of::<u32>(),
+                &zero as *const u32 as *const std::ffi::c_void,
+                0,
+                std::ptr::null()
+            )
+            .map_err(|e| format!("Failed to initialize count buffer: {}", e))?
+        };
+        
+        // Create kernel
+        use std::ffi::CString;
+        let kernel_name = CString::new("search_keys").unwrap();
+        
+        // Create the kernel
+        let kernel = unsafe {
+            // Get the raw program pointer using transmute (this is unsafe but necessary)
+            let program_ptr = program as *const Program as *mut std::ffi::c_void;
+            
+            // Create kernel using the raw pointer
+            let kernel_ptr = create_kernel(
+                program_ptr, kernel_name.as_c_str())
+                .map_err(|e| format!("Failed to create kernel: {}", e))?;
+            
+            Kernel::new(kernel_ptr)
+                .map_err(|e| format!("Failed to create kernel object: {}", e))?
+        };
+        
+        // Set kernel arguments
+        unsafe {
+            // Set arguments based on the updated kernel signature
+            kernel.set_arg(0, &cl_mem::from(target_buffer))
+                .map_err(|e| format!("Failed to set target_buffer arg: {}", e))?;
+            
+            kernel.set_arg(1, &cl_mem::from(result_keys_buffer))
+                .map_err(|e| format!("Failed to set result_keys_buffer arg: {}", e))?;
+            
+            kernel.set_arg(2, &cl_mem::from(count_buffer))
+                .map_err(|e| format!("Failed to set count_buffer arg: {}", e))?;
+            
+            let targets_len: u32 = 1; // We're only using a single target
+            
+            kernel.set_arg(3, &targets_len)
+                .map_err(|e| format!("Failed to set targets_len arg: {}", e))?;
+            
+            kernel.set_arg(4, &range_start)
+                .map_err(|e| format!("Failed to set range_start arg: {}", e))?;
+            
+            kernel.set_arg(5, &range_end)
+                .map_err(|e| format!("Failed to set range_end arg: {}", e))?;
+        }
+        
+        // Calculate appropriate work sizes based on range size
+        let global_work_size = std::cmp::min(adjusted_batch_size, 65536); // Limit work size
+        let local_work_size = std::cmp::min(256, global_work_size); // Use 256 threads per work group or less
+        
+        println!("GPU: Executing kernel with {} work items (local size: {})", 
+                 global_work_size, local_work_size);
+        
+        // Execute the kernel
+        unsafe {
+            enqueue_nd_range_kernel(
+                queue.get(),
+                kernel.get(),
+                1,
+                std::ptr::null(),
+                &global_work_size as *const usize as *const libc::size_t,
+                &local_work_size as *const usize as *const libc::size_t,
+                0,
+                std::ptr::null()
+            )
+            .map_err(|e| format!("Failed to enqueue kernel: {}", e))?
+        };
+        
+        // Read result count
+        let mut count: u32 = 0;
+        unsafe {
+            enqueue_read_buffer(
+                queue.get(),
+                count_buffer,
+                CL_TRUE,
+                0,
+                std::mem::size_of::<u32>(),
+                &mut count as *mut u32 as *mut std::ffi::c_void,
+                0,
+                std::ptr::null()
+            )
+            .map_err(|e| format!("Failed to read count: {}", e))?
+        };
+        
+        println!("GPU: Found {} potential results", count);
+        
+        // Read results
+        let mut results = vec![0u64; std::cmp::min(count as usize, 100)]; // Limit to max 100 results
+        if count > 0 {
+            unsafe {
+                enqueue_read_buffer(
+                    queue.get(),
+                    result_keys_buffer,
+                    CL_TRUE,
+                    0,
+                    std::mem::size_of::<u64>() * results.len(),
+                    results.as_mut_ptr() as *mut std::ffi::c_void,
+                    0,
+                    std::ptr::null()
+                )
+                .map_err(|e| format!("Failed to read results: {}", e))?
+            };
+        }
+        
+        // Cleanup
+        unsafe {
+            release_mem_object(target_buffer).ok();
+            release_mem_object(result_keys_buffer).ok();
+            release_mem_object(count_buffer).ok();
+        }
+        
+        Ok(results)
     }
 
     /// Thread-safe search function that doesn't require sending the GpuSearcher across threads
@@ -649,26 +652,82 @@ impl GpuSearcher {
         range_end: u64,
         batch_size: usize
     ) -> Result<Vec<u64>, Box<dyn Error>> {
-        // Create a HashSet with the single target
-        let mut targets = HashSet::new();
-        targets.insert(*target);
-        
         // Validate range size
         if range_end <= range_start {
             println!("Aviso: Range inválido para GPU ({} - {}), pulando.", range_start, range_end);
             return Ok(vec![]);
         }
         
-        let range_size = range_end - range_start;
-        if range_size > 10_000_000_000u64 {
-            println!("Aviso: Range muito grande para GPU ({} chaves), dividindo em sub-chunks.", range_size);
+        // Check if GPU context is initialized
+        #[cfg(feature = "opencl")]
+        {
+            if self.context.is_none() || self.queue.is_none() || self.program.is_none() {
+                return Err("OpenCL não inicializado. Chame initialize_program() primeiro.".into());
+            }
         }
         
-        // Call the main search function
-        println!("{}GPU iniciando busca no range: {} - {}{}", 
-                 crate::colors::MAGENTA, range_start, range_end, crate::colors::RESET); 
+        let range_size = range_end - range_start;
         
-        // Call the main search function with better progress indication
-        self.search(&targets, range_start, range_end, batch_size)
+        // Output info message
+        println!("{}GPU iniciando busca no range: {} - {}{}", 
+                 crate::colors::MAGENTA, range_start, range_end, crate::colors::RESET);
+        
+        // SAFETY CHECK: Limit maximum range size for GPU processing to prevent crashes
+        const MAX_GPU_CHUNK_SIZE: u64 = 100_000_000; // 100 million keys per GPU chunk
+        
+        #[cfg(feature = "opencl")]
+        {
+            // If range is too large, process it in smaller chunks
+            if range_size > MAX_GPU_CHUNK_SIZE {
+                println!("GPU: Range too large ({} keys), splitting into smaller chunks", range_size);
+                let mut all_results = Vec::new();
+                let num_chunks = (range_size + MAX_GPU_CHUNK_SIZE - 1) / MAX_GPU_CHUNK_SIZE;
+                
+                // Process each chunk
+                for i in 0..num_chunks {
+                    let chunk_start = range_start + i * MAX_GPU_CHUNK_SIZE;
+                    let chunk_end = std::cmp::min(range_start + (i + 1) * MAX_GPU_CHUNK_SIZE, range_end);
+                    
+                    println!("GPU: Processing chunk {}/{}: {} - {}", 
+                             i+1, num_chunks, chunk_start, chunk_end);
+                    
+                    // Use a try-catch pattern to handle GPU errors gracefully
+                    match self.safe_gpu_search(target, 1, chunk_start, chunk_end, batch_size) {
+                        Ok(results) => {
+                            if !results.is_empty() {
+                                all_results.extend(results);
+                            }
+                        },
+                        Err(e) => {
+                            println!("GPU: Error processing chunk: {}", e);
+                            println!("GPU: Falling back to CPU for this chunk");
+                            // Fall back to CPU-based search if GPU search fails
+                            return Err(format!("GPU search failed: {}", e).into());
+                        }
+                    }
+                    
+                    // Update progress counter
+                    crate::performance::increment_keys_checked((chunk_end - chunk_start) as usize);
+                }
+                
+                return Ok(all_results);
+            }
+            
+            // Process smaller ranges directly
+            match self.safe_gpu_search(target, 1, range_start, range_end, batch_size) {
+                Ok(results) => {
+                    // Update keys checked counter
+                    crate::performance::increment_keys_checked(range_size as usize);
+                    Ok(results)
+                },
+                Err(e) => {
+                    println!("GPU: Error: {}", e);
+                    Err(e)
+                }
+            }
+        }
+        
+        #[cfg(not(feature = "opencl"))]
+        Err("OpenCL support not compiled".into())
     }
 } 

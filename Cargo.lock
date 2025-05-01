@@ -71,6 +71,7 @@ dependencies = [
  "cc",
  "chrono",
  "hex",
+ "libc",
  "libloading",
  "mimalloc",
  "num-bigint",
