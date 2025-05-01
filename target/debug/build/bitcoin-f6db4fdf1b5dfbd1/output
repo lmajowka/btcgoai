@@ -1,3 +1,0 @@
-cargo:rustc-cfg=rust_v_1_46
-cargo:rustc-cfg=rust_v_1_53
-cargo:rustc-cfg=rust_v_1_60

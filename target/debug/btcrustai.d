@@ -1,1 +1,0 @@
-E:\Projetos\btcgoai\target\debug\btcrustai.exe: E:\Projetos\btcgoai\src\bitcoin.rs E:\Projetos\btcgoai\src\bitcoin_puzzle.rs E:\Projetos\btcgoai\src\colors.rs E:\Projetos\btcgoai\src\data.rs E:\Projetos\btcgoai\src\main.rs E:\Projetos\btcgoai\src\models.rs E:\Projetos\btcgoai\src\search.rs
