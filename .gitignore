@@ -36,4 +36,19 @@ Thumbs.db
 *.log
 
 # Environment variables
-.env 
+.env
+
+# Rust specific
+**/*.rs.bk
+Cargo.lock
+target/
+debug/
+release/
+
+# Specific Rust build files
+**/.rustc_info.json
+**/.fingerprint/
+
+# Others
+**/*.profraw
+flamegraph.svg 
