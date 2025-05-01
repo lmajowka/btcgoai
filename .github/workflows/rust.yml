@@ -32,10 +32,9 @@ jobs:
       run: cargo build --release --verbose
       
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: btcrustai-${{ matrix.os }}
         path: |
-          target/release/btcrustai
-          target/release/btcrustai.exe
+          target/release/btcrustai${{ runner.os == 'Windows' && '.exe' || '' }}
         if-no-files-found: ignore 
