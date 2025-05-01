@@ -52,3 +52,5 @@ release/
 # Others
 **/*.profraw
 flamegraph.svg 
+# Build directory with all contents
+target/**/*
