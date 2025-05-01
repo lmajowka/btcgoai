@@ -10,6 +10,7 @@ pub struct SystemResources {
     pub available_memory: u64,    // Memória disponível em bytes
     pub cpu_count: usize,         // Número de núcleos físicos
     pub thread_count: usize,      // Número de threads lógicos
+    #[allow(dead_code)]
     pub cpu_usage: f32,           // Uso atual da CPU (0-100%)
     pub cpu_brand: String,        // Informação da CPU (marca/modelo)
     pub has_avx: bool,            // Suporte a AVX
@@ -21,9 +22,13 @@ pub struct SystemResources {
 pub struct SearchParameters {
     pub thread_count: usize,      // Número de threads a usar
     pub batch_size: usize,        // Tamanho do batch para processamento
-    pub memory_limit: usize,      // Limite de memória em bytes
-    pub use_simd: bool,           // Se deve usar instruções SIMD
     pub resource_usage: u8,       // Percentual de recursos a utilizar (1-100)
+    
+    // Essas opções são usadas internamente pelo sistema
+    #[allow(dead_code)]
+    pub memory_limit: usize,      // Limite de memória em bytes
+    #[allow(dead_code)]
+    pub use_simd: bool,           // Se deve usar instruções SIMD
 }
 
 // Detecta recursos do sistema
@@ -155,6 +160,7 @@ pub fn estimate_search_speed(resources: &SystemResources, params: &SearchParamet
 }
 
 // Estima o tempo necessário para busca em um intervalo
+#[allow(dead_code)]
 pub fn estimate_search_time(min_key: &BigUint, max_key: &BigUint, keys_per_sec: u64) -> f64 {
     let range_size = (max_key - min_key).to_f64().unwrap_or(f64::MAX);
     range_size / keys_per_sec as f64

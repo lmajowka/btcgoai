@@ -15,8 +15,6 @@ use crate::bitcoin::{pad_private_key, private_key_to_hash160, private_key_to_wif
 use crate::colors;
 use crate::performance;
 
-// Tamanho do batch para processamento em lotes
-const BATCH_SIZE: usize = 1024;
 // Frequência de atualização das estatísticas (em segundos)
 const STATS_UPDATE_INTERVAL: u64 = 5;
 
@@ -31,6 +29,7 @@ fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
 }
 
 // Função para procurar a chave privada dentro de um intervalo específico
+#[allow(dead_code)]
 pub fn search_for_private_key(min_key: &BigUint, max_key: &BigUint, target_hash160: &[u8]) {
     let range_size = max_key - min_key;
     let range_size_f64 = range_size.to_f64().unwrap_or(f64::MAX);
@@ -76,7 +75,6 @@ pub fn search_for_private_key(min_key: &BigUint, max_key: &BigUint, target_hash1
                             colors::RESET);
                             
                     // Estimativa de tempo restante
-                    let total_elapsed = start_time.elapsed().as_secs_f64();
                     let keys_remaining = range_size_f64_clone - current_keys_checked as f64;
                     let time_remaining = keys_remaining / keys_per_second;
                     
@@ -132,12 +130,12 @@ pub fn search_for_private_key(min_key: &BigUint, max_key: &BigUint, target_hash1
     // Processamento paralelo dos chunks
     chunks.par_iter().for_each(|(chunk_min, chunk_max)| {
         let mut current_key = chunk_min.clone();
-        let mut batch = Vec::with_capacity(BATCH_SIZE);
+        let mut batch = Vec::with_capacity(1024); // Usar um valor fixo em vez da constante
         
         while &current_key <= chunk_max {
             // Preencher o batch
             batch.clear();
-            for _ in 0..BATCH_SIZE {
+            for _ in 0..1024 { // Usar um valor fixo em vez da constante
                 if &current_key > chunk_max {
                     break;
                 }
@@ -256,14 +254,16 @@ pub fn search_for_private_key_optimized(chunks: &[(BigUint, BigUint)], target_ha
                         keys_per_second / 1_000_000.0,
                         colors::RESET);
                 
-                // Estatísticas adicionais
-                let total_elapsed = start_time.elapsed().as_secs_f64();
-                let overall_speed = current_keys_checked as f64 / total_elapsed;
-                
-                println!("{}Velocidade média global: {:.2} M/s{}", 
-                        colors::YELLOW,
-                        overall_speed / 1_000_000.0,
-                        colors::RESET);
+                // Velocidade média global
+                if elapsed.as_secs() > 0 {
+                    let overall_time = start_time.elapsed().as_secs_f64();
+                    let overall_speed = current_keys_checked as f64 / overall_time;
+                    
+                    println!("{}Velocidade média global: {:.2} M/s{}", 
+                            colors::YELLOW,
+                            overall_speed / 1_000_000.0,
+                            colors::RESET);
+                }
                 
                 last_update = Instant::now();
                 last_keys_checked = current_keys_checked;
