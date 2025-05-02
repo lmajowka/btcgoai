@@ -1,0 +1,11 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/LIBPATH:C:\\Windows\\System32"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/LIBPATH:C:\\Windows\\SysWOW64"]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-LC:\\Windows\\System32"]
+
+[target.i686-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-LC:\\Windows\\SysWOW64"] 
